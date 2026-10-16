@@ -4,7 +4,7 @@ import WebKit
 
 /// 应用外壳：窗口、菜单栏、服务生命周期与诊断入口。
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
-    private var supervisor: ServiceSupervisor!
+    private var supervisor: ServiceSupervisor?
     private var window: NSWindow!
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
@@ -12,27 +12,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private let statusLabel = NSTextField(labelWithString: "正在启动…")
     private let headless = CommandLine.arguments.contains("--headless")
 
-    private var baseURL: URL {
-        URL(string: "http://127.0.0.1:\(supervisor.frontendPort)/")!
-    }
+    private var mode: ServiceMode = .attached(URL(string: "http://127.0.0.1:3000/")!)
+    private var baseURL = URL(string: "http://127.0.0.1:3000/")!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let layout = BundleLayout.current()
-        supervisor = ServiceSupervisor(
-            layout: layout,
-            backendPort: envPort("MOVPILOT_BACKEND_PORT", default: 3001),
-            frontendPort: envPort("MOVPILOT_FRONTEND_PORT", default: 3000)
+        mode = PortAllocator.resolve(
+            backend: envPort("MOVPILOT_BACKEND_PORT", default: 3001),
+            frontend: envPort("MOVPILOT_FRONTEND_PORT", default: 3000)
         )
-        supervisor.onStateChange = { [weak self] state in self?.render(state) }
+        switch mode {
+        case .attached(let url):
+            // 已有一套 MoviePilot 在跑（通常是 CLI 版），只显示，不重复起服务。
+            baseURL = url
+            statusLabel.stringValue = "已连接到运行中的实例 · \(url.absoluteString)"
+            startButton?.isHidden = true
+        case .owned(let backendPort, let frontendPort):
+            baseURL = URL(string: "http://127.0.0.1:\(frontendPort)/")!
+            let supervisor = ServiceSupervisor(layout: layout, backendPort: backendPort, frontendPort: frontendPort)
+            supervisor.onStateChange = { [weak self] state in self?.render(state) }
+            self.supervisor = supervisor
+        }
         buildStatusItem()
         if !headless { buildWindow() }
-        supervisor.start()
+        supervisor?.start() ?? loadInterface()
+    }
+
+    /// 附加模式下没有子进程，界面直接加载。
+    private func loadInterface() {
+        webView?.load(URLRequest(url: baseURL))
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        supervisor.stop()
+        supervisor?.stop()
         return .terminateNow
     }
 
@@ -93,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             statusLabel.stringValue = "服务运行中 · \(baseURL.absoluteString)"
             startButton?.title = "停止服务"
             if webView != nil, webView.url == nil { webView.load(URLRequest(url: baseURL)) }
+            if case .attached(let url) = mode { statusLabel.stringValue = "已连接到运行中的实例 · \(url.absoluteString)" }
         case .stopped:
             statusLabel.stringValue = "服务已停止"
             startButton?.title = "启动服务"
@@ -124,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     @objc private func reload() { webView?.reload() }
 
     @objc private func toggleService() {
+        guard let supervisor else { return }
         supervisor.isRunning ? supervisor.stop() : supervisor.start()
     }
 

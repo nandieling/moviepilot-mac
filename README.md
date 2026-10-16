@@ -41,6 +41,17 @@ MoviePilot.app/Contents/Resources/
 
 数据目录沿用 `~/Library/Application Support/MoviePilot`，CLI 版用户可直接继承已有 `user.db`、插件与 Cookie。
 
+## 与 CLI 版共存
+
+应用启动时先探端口（connect 探活，不看 TIME_WAIT）：
+
+- 3000/3001 空闲：自己拉起一套服务。
+- 3000 上已经是 MoviePilot：直接接入这个实例，不再起第二个后端，界面标题会写明。
+- 端口被别的程序占用：整对端口顺延 +1 直到最多 +20，并记住这次的选择。
+
+环境变量：`MOVPILOT_FRONTEND_PORT`、`MOVPILOT_BACKEND_PORT` 指定首选端口；`MOVPILOT_PORT_PERSIST=0`
+关闭端口记忆（测试脚本用，保证每次都用指定端口）。
+
 ## 已知缺口
 
 - 发布模式待接入 python-build-standalone 运行时下载与依赖冻结（M2）。
