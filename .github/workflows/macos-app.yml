@@ -1,0 +1,45 @@
+name: macOS 应用构建
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 上游后端 tag
+        required: true
+        default: v3.1.6
+  schedule:
+    - cron: "20 1 * * *"   # 每天检查上游是否有新 tag
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取上游后端 tag
+        run: |
+          git clone --depth 1 --branch "${{ inputs.tag }}" \
+            https://github.com/jxxghp/MoviePilot.git upstream
+
+      - name: 按 version.py 取配套前端
+        run: python3 packaging/fetch_frontend.py --repo upstream
+
+      - name: 组装内嵌 Python 运行时
+        run: python3 packaging/build_runtime.py --repo upstream --out runtime
+
+      - name: 托管层单测
+        run: python3 -m unittest discover -s tests -p "test_*.py"
+
+      - name: 编译宿主
+        run: swift build --package-path host -c release
+
+      - name: 组装应用
+        run: python3 packaging/build_app.py --upstream upstream --runtime runtime
+
+      - name: 冒烟测试
+        run: python3 packaging/smoke_test.py --wait 120
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MoviePilot
+          path: dist/MoviePilot.app

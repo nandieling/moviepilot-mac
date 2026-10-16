@@ -1,0 +1,203 @@
+"""mpweb 托管层测试：转发保真、SPA 回退、缓存策略、看门狗。
+
+用 httpx 的 ASGITransport 直接驱动应用，避免测试客户端的桥接线程干扰判定。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import threading
+import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pythonhost"))
+
+import httpx
+
+from mpweb import BackendProxy, BackendWatchdog, create_app, serve
+
+SEEN: dict = {}
+
+
+class FakeBackend(BaseHTTPRequestHandler):
+    """按需返回不同形态的响应，覆盖代理需要保真的每种情况。"""
+
+    protocol_version = "HTTP/1.1"
+
+    def _respond(self) -> None:
+        SEEN["method"] = self.command
+        SEEN["path"] = self.path
+        SEEN["headers"] = {k.lower(): v for k, v in self.headers.items()}
+        length = int(self.headers.get("content-length") or 0)
+        SEEN["body"] = self.rfile.read(length).decode() if length else ""
+
+        if self.path.startswith("/api/v1/cookies"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Set-Cookie", "a=1; Path=/")
+            self.send_header("Set-Cookie", "b=2; Path=/")
+            self.send_header("Content-Length", "9")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+            return
+
+        if self.path.startswith("/api/v1/stream"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(b"data: one\n\ndata: two\n\n")
+            self.close_connection = True
+            return
+
+        if self.path.startswith("/api/v1/boom"):
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        payload = json.dumps(
+            {"method": self.command, "path": self.path, "body": SEEN["body"]}
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    do_GET = do_POST = do_PUT = do_DELETE = _respond
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = HTTPServer(("127.0.0.1", 0), FakeBackend)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+        cls.tmp = TemporaryDirectory()
+        root = Path(cls.tmp.name)
+        (root / "index.html").write_text("<!doctype html>app", encoding="utf-8")
+        (root / "assets").mkdir()
+        (root / "assets" / "index-abc123.js").write_text("console.log(1)", encoding="utf-8")
+        cls.web_root = root
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.tmp.cleanup()
+
+    async def asyncSetUp(self) -> None:
+        self.proxy = BackendProxy(f"http://127.0.0.1:{self.port}")
+        self.transport = httpx.ASGITransport(
+            app=create_app(web_root=self.web_root, proxy=self.proxy)
+        )
+        self.client = httpx.AsyncClient(
+            transport=self.transport, base_url="http://local.test"
+        )
+
+    async def asyncTearDown(self) -> None:
+        await self.client.aclose()
+        await self.proxy.close()
+
+    async def test_path_and_query_are_forwarded_verbatim(self) -> None:
+        response = await self.client.get(
+            "/api/v1/login/initialization", params={"refresh": "1", "q": "中"}
+        )
+        self.assertEqual(response.status_code, 200)
+        forwarded = json.loads(response.text)["path"]
+        self.assertTrue(forwarded.startswith("/api/v1/login/initialization?"))
+        self.assertIn("refresh=1", forwarded)
+        self.assertIn("q=%E4%B8%AD", forwarded)
+
+    async def test_method_and_body_survive_proxy(self) -> None:
+        response = await self.client.post("/api/v1/echo", json={"hello": "world"})
+        payload = json.loads(response.text)
+        self.assertEqual(payload["method"], "POST")
+        self.assertEqual(json.loads(payload["body"]), {"hello": "world"})
+
+    async def test_duplicate_set_cookie_headers_preserved(self) -> None:
+        response = await self.client.get("/api/v1/cookies")
+        cookies = sorted(
+            value for name, value in response.headers.multi_items()
+            if name.lower() == "set-cookie"
+        )
+        self.assertEqual(cookies, ["a=1; Path=/", "b=2; Path=/"])
+
+    async def test_streaming_response_passes_through(self) -> None:
+        response = await self.client.get("/api/v1/stream")
+        self.assertEqual(response.headers["content-type"], "text/event-stream")
+        self.assertEqual(response.text, "data: one\n\ndata: two\n\n")
+
+    async def test_upstream_status_is_not_rewritten(self) -> None:
+        response = await self.client.get("/api/v1/boom")
+        self.assertEqual(response.status_code, 500)
+
+    async def test_proxy_adds_forwarded_headers(self) -> None:
+        await self.client.get("/cookiecloud/sync")
+        self.assertIn("x-forwarded-for", SEEN["headers"])
+        self.assertEqual(SEEN["headers"]["x-forwarded-proto"], "http")
+
+    async def test_index_html_is_revalidated_every_time(self) -> None:
+        response = await self.client.get("/")
+        self.assertEqual(response.headers["cache-control"], "no-cache")
+
+    async def test_hashed_assets_are_immutable(self) -> None:
+        response = await self.client.get("/assets/index-abc123.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("immutable", response.headers["cache-control"])
+
+    async def test_unknown_get_falls_back_to_index(self) -> None:
+        response = await self.client.get("/subscription/detail")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.text, "<!doctype html>app")
+
+    async def test_api_prefix_is_never_served_from_disk(self) -> None:
+        # 前端目录里也有 index.html，代理前缀必须抢先命中后端
+        response = await self.client.get("/api/index.html")
+        self.assertEqual(json.loads(response.text)["path"], "/api/index.html")
+
+    async def test_backend_down_yields_502_not_traceback(self) -> None:
+        dead = BackendProxy("http://127.0.0.1:1")
+        transport = httpx.ASGITransport(
+            app=create_app(web_root=self.web_root, proxy=dead)
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://local.test"
+        ) as client:
+            response = await client.get("/api/v1/anything")
+        await dead.close()
+        self.assertEqual(response.status_code, 502)
+        self.assertFalse(response.json()["success"])
+
+
+class WatchdogTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_serve_refuses_to_start_without_backend(self) -> None:
+        with TemporaryDirectory() as tmp:
+            code = await serve(
+                web_root=Path(tmp),
+                backend_url="http://127.0.0.1:1",
+                host="127.0.0.1",
+                port=0,
+                health_timeout=0.5,
+                max_failures=2,
+            )
+        self.assertEqual(code, 1)
+
+    async def test_watchdog_counts_consecutive_failures(self) -> None:
+        watchdog = BackendWatchdog(
+            base_url="http://127.0.0.1:1", timeout=0.5, max_failures=3
+        )
+        self.assertFalse(await watchdog.wait_ready(attempts=2))
+        self.assertEqual(watchdog.failures, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
