@@ -22,6 +22,8 @@ class BackendWatchdog:
     interval: float = 15.0
     timeout: float = 3.0
     max_failures: int = 4
+    ready_timeout: float = 120.0
+    probe_interval: float = 1.0
     on_fatal: Callable[[str], Awaitable[None]] | None = None
     _failures: int = field(default=0, init=False)
 
@@ -35,17 +37,22 @@ class BackendWatchdog:
             return False
         return response.status_code < 400
 
-    async def wait_ready(self, attempts: int | None = None) -> bool:
-        """启动前等待后端就绪，失败次数用尽返回 False。"""
-        attempts = attempts or self.max_failures
-        for attempt in range(1, attempts + 1):
+    async def wait_ready(self, timeout: float | None = None) -> bool:
+        """启动前等后端就绪，按总时长判定。
+
+        冷启动的完整包要先导入上千个模块再跑迁移，几秒的耐心只够开发用的热目录，
+        等太短会让宿主反复重启整套服务。运行期的失联判定仍用 max_failures。
+        """
+        budget = self.ready_timeout if timeout is None else timeout
+        deadline = time.monotonic() + budget
+        while True:
             if await self.check():
                 self._failures = 0
                 return True
-            self._failures = attempt
-            if attempt < attempts:
-                await asyncio.sleep(1.0)
-        return False
+            self._failures += 1
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(self.probe_interval)
 
     async def run(self) -> None:
         """周期巡检，连续失败达到阈值时通知宿主。"""

@@ -50,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="宿主应用进程号，宿主消失时本进程跟随退出",
     )
     parser.add_argument(
+        "--ready-timeout",
+        type=float,
+        default=_env_int("MOVIEPILOT_FRONTEND_READY_TIMEOUT_S", 120),
+        help="启动后等待后端就绪的秒数",
+    )
+    parser.add_argument(
         "--max-failures",
         type=int,
         default=max(_env_int("MOVIEPILOT_FRONTEND_MAX_FAILURES", 4), 1),
@@ -73,6 +79,7 @@ def main(argv: list[str] | None = None) -> int:
             health_interval=_env_int("MOVIEPILOT_FRONTEND_HEALTH_INTERVAL_MS", 15000) / 1000,
             health_timeout=_env_int("MOVIEPILOT_FRONTEND_HEALTH_TIMEOUT_MS", 3000) / 1000,
             max_failures=args.max_failures,
+            ready_timeout=args.ready_timeout,
             host_pid=args.host_pid,
         )
     )

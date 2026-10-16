@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var statusItem: NSStatusItem!
     private var startButton: NSMenuItem!
     private let statusLabel = NSTextField(labelWithString: "正在启动…")
+    private var loadDeadline = Date.distantPast
     private let headless = CommandLine.arguments.contains("--headless")
 
     private var mode: ServiceMode = .attached(URL(string: "http://127.0.0.1:3000/")!)
@@ -39,8 +40,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     /// 附加模式下没有子进程，界面直接加载。
-    private func loadInterface() {
-        webView?.load(URLRequest(url: baseURL))
+    /// 自建服务的首屏可能在后端就绪之前发起，失败后在预算内自动重试，
+    /// 否则用户只能对着空白页手动点重新载入。
+    private func loadInterface(withRetries deadline: TimeInterval = 120) {
+        guard let webView else { return }
+        loadDeadline = Date().addingTimeInterval(deadline)
+        webView.load(URLRequest(url: baseURL))
+    }
+
+    private func retryLoad() {
+        guard Date() < loadDeadline else { return }
+        statusLabel.stringValue = "正在启动…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, Date() < self.loadDeadline else { return }
+            self.webView.load(URLRequest(url: self.baseURL))
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -107,7 +121,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         case .running:
             statusLabel.stringValue = "服务运行中 · \(baseURL.absoluteString)"
             startButton?.title = "停止服务"
-            if webView != nil, webView.url == nil { webView.load(URLRequest(url: baseURL)) }
+            if webView != nil, webView.url == nil { loadInterface() }
             if case .attached(let url) = mode { statusLabel.stringValue = "已连接到运行中的实例 · \(url.absoluteString)" }
         case .stopped:
             statusLabel.stringValue = "服务已停止"
@@ -156,7 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         process.currentDirectoryURL = layout.backendRoot
         var environment = ProcessInfo.processInfo.environment
         environment["CONFIG_DIR"] = layout.configDir.path
-        environment["PYTHONPATH"] = layout.pythonPath(sitePackages: nil)
+        environment["PYTHONPATH"] = layout.pythonPath()
         process.environment = environment
         let output = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("moviepilot-doctor-\(Int(Date().timeIntervalSince1970)).json")
@@ -188,6 +202,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     // MARK: - WKNavigationDelegate
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        retryLoad()
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        retryLoad()
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        loadDeadline = .distantPast
+    }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         // 站外链接交给系统浏览器，避免界面里跳出无关页面。

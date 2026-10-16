@@ -62,17 +62,16 @@ final class ServiceSupervisor {
         }
         try? FileManager.default.createDirectory(at: layout.logDir, withIntermediateDirectories: true)
 
-        let sitePackages = layout.python
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("lib/site-packages")
         var environment = ProcessInfo.processInfo.environment
         environment["CONFIG_DIR"] = layout.configDir.path
         environment["PORT"] = String(backendPort)
         environment["NGINX_PORT"] = String(frontendPort)
         environment["MOVIEPILOT_WEB_ROOT"] = layout.webRoot.path
         environment["MOVPILOT_HOST_PID"] = String(ProcessInfo.processInfo.processIdentifier)
-        environment["PYTHONPATH"] = layout.pythonPath(sitePackages: sitePackages)
+        environment["PYTHONPATH"] = layout.pythonPath()
         environment.removeValue(forKey: "PYTHONHOME")
+        // 子进程输出重定向到文件时默认块缓冲，异常退出会丢掉最后几行
+        environment["PYTHONUNBUFFERED"] = "1"
 
         let backendProcess = makeProcess(arguments: ["-m", "mpweb.backend"], environment: environment, logName: "backend")
         let frontendProcess = makeProcess(
@@ -119,8 +118,12 @@ final class ServiceSupervisor {
         process.currentDirectoryURL = layout.backendRoot
         process.environment = environment
         let logURL = layout.logDir.appendingPathComponent("moviepilot.\(logName).app.log")
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        // 自动重启时续写同一份日志：截断重写会把第一次失败的现场抹掉
         if let handle = try? FileHandle(forWritingTo: logURL) {
+            handle.seekToEndOfFile()
             process.standardOutput = handle
             process.standardError = handle
         }

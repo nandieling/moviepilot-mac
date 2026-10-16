@@ -45,8 +45,7 @@ struct BundleLayout {
         )
     }
 
-    /// 传给两个子进程的 PYTHONPATH：随包的托管层 + 随包运行时站点目录。
-    func pythonPath(sitePackages: URL?) -> String {
-        [pythonHost.path, sitePackages?.path].compactMap { $0 }.joined(separator: ":")
-    }
+    /// 传给两个子进程的 PYTHONPATH：只需随包的托管层。
+    /// 解释器自己会找到包内 site-packages，猜路径反而容易猜错。
+    func pythonPath() -> String { pythonHost.path }
 }

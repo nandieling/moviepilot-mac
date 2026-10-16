@@ -188,15 +188,32 @@ class WatchdogTestCase(unittest.IsolatedAsyncioTestCase):
                 port=0,
                 health_timeout=0.5,
                 max_failures=2,
+                ready_timeout=1,
             )
         self.assertEqual(code, 1)
 
-    async def test_watchdog_counts_consecutive_failures(self) -> None:
+    async def test_watchdog_gives_up_after_ready_timeout(self) -> None:
+        """后端始终不响应：等到超时才放弃，并把失败次数留在 failures 上。"""
         watchdog = BackendWatchdog(
-            base_url="http://127.0.0.1:1", timeout=0.5, max_failures=3
+            base_url="http://127.0.0.1:1", timeout=0.5, ready_timeout=0, probe_interval=0
         )
-        self.assertFalse(await watchdog.wait_ready(attempts=2))
-        self.assertEqual(watchdog.failures, 2)
+        self.assertFalse(await watchdog.wait_ready())
+        self.assertEqual(watchdog.failures, 1)
+
+    async def test_watchdog_waits_out_slow_backend(self) -> None:
+        """后端慢启动：只要预算内就绪就算成功，不能被少数几次失败判死。"""
+        class SlowBackend(BackendWatchdog):
+            probes = 0
+
+            async def check(self) -> bool:
+                type(self).probes += 1
+                return type(self).probes >= 4
+
+        watchdog = SlowBackend(base_url="http://127.0.0.1:1", timeout=0.5,
+                               ready_timeout=10, probe_interval=0)
+        self.assertTrue(await watchdog.wait_ready())
+        self.assertEqual(SlowBackend.probes, 4)
+        self.assertEqual(watchdog.failures, 0)
 
 
 if __name__ == "__main__":

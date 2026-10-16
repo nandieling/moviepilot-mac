@@ -1,0 +1,24 @@
+{
+  "python": {
+    "version": "3.14.8",
+    "release": "20261013",
+    "channel": "astral-sh/python-build-standalone",
+    "note": "GIL 构建：上游扩展轮子按 cp314 发布，free-threaded 轮子尚未铺齐",
+    "assets": {
+      "arm64": {
+        "file": "cpython-3.14.8+20261013-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.14.8%2B20261013-aarch64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "994adadc202c5df0b4570192cc9a70e3f2c131e512f4a125c56efa8562f44b28"
+      },
+      "x86_64": {
+        "file": "cpython-3.14.8+20261013-x86_64-apple-darwin-install_only_stripped.tar.gz",
+        "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261013/cpython-3.14.8%2B20261013-x86_64-apple-darwin-install_only_stripped.tar.gz",
+        "sha256": "f0137337ecf6234b30c9c955219dae2d71e1a00387c4d204d6c6929e24bf9a90"
+      }
+    }
+  },
+  "frontend": {
+    "repo": "jxxghp/MoviePilot-Frontend",
+    "asset": "dist.zip"
+  }
+}

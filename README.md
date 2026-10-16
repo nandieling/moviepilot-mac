@@ -17,10 +17,10 @@
 ## 本地验证
 
 ```
-swift build --package-path host                      # 编译宿主
-python3 -m unittest discover -s tests -p "test_*.py"  # 托管层单测
-python3 packaging/build_app.py --dev-root ~/MoviePilot  # 用本地 CLI 版做运行时出开发包
-packaging/lifecycle_check.sh ~/MoviePilot             # 界面可用 + 退出无孤儿
+swift build --package-path host                       # 编译宿主
+python3 -m unittest discover -s tests -p "test_*.py"   # 托管层单测
+python3 packaging/build_app.py --dev-root ~/MoviePilot # 借本地 CLI 版出开发包
+packaging/lifecycle_check.sh ~/MoviePilot              # 界面可用 + 退出无孤儿
 ```
 
 开发包用 `MOVPILOT_DEV_ROOT` 指向一份 CLI 版仓库即可运行，不需要完整打包：
@@ -28,6 +28,27 @@ packaging/lifecycle_check.sh ~/MoviePilot             # 界面可用 + 退出无
 ```
 MOVPILOT_DEV_ROOT=~/MoviePilot open dist/MoviePilot.app
 ```
+
+## 发布组包
+
+```
+python3 packaging/build_app.py --tag v3.1.6 --backend-repo ~/MoviePilot --dmg
+```
+
+四步各自独立、都有缓存，重跑一次约两分钟：
+
+1. `git archive` 取该 tag 的干净源码树（丢掉 `public/`，前端另有来源）。
+2. 按 `version.py` 的 `FRONTEND_VERSION` 取前端 `dist.zip`，用发布产物自带的 digest 校验；
+   `version.txt` 与后端声明不一致直接失败 —— 前后端版本不成对正是「缓存版本不一致」弹窗的根源。
+3. `build_runtime.py` 按 `runtime-manifest.json` 钉住的 python-build-standalone 独立解释器解包，
+   用 `uv` 按上游 `uv.lock` 装依赖，再编译中文检索扩展（用户机器上不再需要 C 编译器）。
+4. `fetch_resources.py` 同步 `sites` 原生扩展与站点数据包，这两个文件不在后端 git 里。
+
+装完用包内解释器跑一遍 `import app.main` 验收，预编译字节码，逐个签名内嵌二进制，
+最后 `hdiutil` 出可拖拽 dmg。溯源信息落在 `Resources/build-info.json`。
+
+arm64 产物：`MoviePilot.app` 732 MB，`MoviePilot-v3.1.6-arm64.dmg` 455 MB（内嵌运行时 605 MB、
+前端 53 MB、后端 36 MB）。
 
 ## 包内布局
 
@@ -54,6 +75,9 @@ MoviePilot.app/Contents/Resources/
 
 ## 已知缺口
 
-- 发布模式待接入 python-build-standalone 运行时下载与依赖冻结（M2）。
-- 签名走 Developer ID + 公证，Sparkle 更新通道待接；当前只做 ad-hoc 签名。
-- 首启向导复用上游 `init` 内部命令，界面部分待做（M1）。
+- 签名目前只有 ad-hoc：换 Developer ID 证书 + 公证只需给 `build_app.py --identity`，
+  但内嵌 572 个二进制的逐层签名要在真证书下再验一遍。
+- Sparkle 更新通道未接，appcast 地址是占位值。
+- 首启向导复用上游 `init` 内部命令，界面部分待做。
+- 内嵌运行时占了 605 MB，其中 langchain/boto3 等可选 SDK 可以按插件需要再裁一轮。
+- `build_runtime.py` 每次组包都重新解包解释器，CI 上可加 `--reuse-runtime` 跳过。

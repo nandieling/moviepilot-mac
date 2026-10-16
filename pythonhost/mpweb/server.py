@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import uvicorn
@@ -84,6 +85,7 @@ async def serve(
     health_interval: float = 15.0,
     health_timeout: float = 3.0,
     max_failures: int = 4,
+    ready_timeout: float = 120.0,
     host_pid: int | None = None,
 ) -> int:
     """启动托管层。返回进程退出码：0 正常退出，1 后端失联或启动失败。"""
@@ -105,9 +107,11 @@ async def serve(
         on_fatal=on_fatal,
     )
     # 前端本地代理不单独存活：后端起不来就直接失败，交给宿主应用处理。
-    if not await watchdog.wait_ready():
+    started = time.monotonic()
+    if not await watchdog.wait_ready(ready_timeout):
         await proxy.close()
-        print("[mpweb] 后端未就绪，跳过启动前端托管层", flush=True)
+        print(f"[mpweb] 后端在 {time.monotonic() - started:.0f}s 内未就绪"
+              f"（探测 {backend_url + health_path}），跳过启动前端托管层", flush=True)
         return 1
 
     server = uvicorn.Server(

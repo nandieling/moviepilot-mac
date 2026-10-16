@@ -3,4 +3,5 @@ __pycache__/
 *.pyc
 host/.build/
 dist/
+.cache/
 packaging/cache/

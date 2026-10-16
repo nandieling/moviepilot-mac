@@ -4,42 +4,66 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 上游后端 tag
-        required: true
-        default: v3.1.6
+        description: 上游后端 tag（留空则取最新）
+        required: false
+        default: ""
   schedule:
-    - cron: "20 1 * * *"   # 每天检查上游是否有新 tag
+    - cron: "20 1 * * *"   # 每天看一次上游有没有新 tag，有就重新组包
+
+env:
+  UPSTREAM: jxxghp/MoviePilot
 
 jobs:
+  decide:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      skip: ${{ steps.pick.outputs.skip }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          latest=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          wanted="${{ inputs.tag }}"
+          [ -z "$wanted" ] && wanted="$latest"
+          shipped=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || echo "")
+          echo "tag=$wanted" >> "$GITHUB_OUTPUT"
+          if [ -z "${{ inputs.tag }}" ] && [ "$wanted" = "$shipped" ]; then
+            echo "上游 $wanted 已发布过，跳过"; echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: decide
+    if: needs.decide.outputs.skip != 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
 
-      - name: 取上游后端 tag
-        run: |
-          git clone --depth 1 --branch "${{ inputs.tag }}" \
-            https://github.com/jxxghp/MoviePilot.git upstream
-
-      - name: 按 version.py 取配套前端
-        run: python3 packaging/fetch_frontend.py --repo upstream
-
-      - name: 组装内嵌 Python 运行时
-        run: python3 packaging/build_runtime.py --repo upstream --out runtime
+      - name: 取上游 tag
+        run: git clone --depth 1 --branch "${{ needs.decide.outputs.tag }}" "https://github.com/$UPSTREAM.git" upstream
 
       - name: 托管层单测
         run: python3 -m unittest discover -s tests -p "test_*.py"
 
-      - name: 编译宿主
-        run: swift build --package-path host -c release
+      - name: 组包
+        run: python3 packaging/build_app.py --tag "${{ needs.decide.outputs.tag }}" --backend-repo upstream --dmg
 
-      - name: 组装应用
-        run: python3 packaging/build_app.py --upstream upstream --runtime runtime
-
-      - name: 冒烟测试
-        run: python3 packaging/smoke_test.py --wait 120
+      - name: 启动自检
+        run: |
+          config=$(mktemp -d)
+          MOVPILOT_BACKEND_PORT=3201 MOVPILOT_FRONTEND_PORT=3200 CONFIG_DIR="$config" \
+            dist/MoviePilot.app/Contents/MacOS/MoviePilotHost --headless &
+          host=$!
+          python3 packaging/smoke_test.py --url http://127.0.0.1:3200 --wait 180
+          kill -TERM $host
+          sleep 5
+          [ -z "$(lsof -nP -iTCP:3200 -iTCP:3201 -sTCP:LISTEN -t)" ] || { echo "退出后仍有残留监听"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MoviePilot
-          path: dist/MoviePilot.app
+          name: MoviePilot-${{ needs.decide.outputs.tag }}
+          path: dist/*.dmg
