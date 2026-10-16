@@ -8,7 +8,7 @@
 | 目录 | 作用 |
 |---|---|
 | `pythonhost/mpweb` | 前端托管层：静态资源 + `/api`、`/cookiecloud` 反代 + 后端健康看门狗，替代上游 `public/service.js`，由此去掉 Node 运行时 |
-| `host` | Swift 宿主：窗口（WKWebView）、菜单栏、子进程守护、登录项 |
+| `host` | Swift 宿主：窗口（WKWebView）、标准主菜单（编辑菜单保证网页里能剪切粘贴）、菜单栏常驻、子进程守护、登录项 |
 | `packaging` | 组包、签名、冒烟与生命周期检查 |
 | `docs/adr` | 决策记录 |
 
@@ -41,7 +41,8 @@ python3 packaging/build_app.py --tag v3.1.6 --backend-repo ~/MoviePilot --dmg
 2. 按 `version.py` 的 `FRONTEND_VERSION` 取前端 `dist.zip`，用发布产物自带的 digest 校验；
    `version.txt` 与后端声明不一致直接失败 —— 前后端版本不成对正是「缓存版本不一致」弹窗的根源。
 3. `build_runtime.py` 按 `runtime-manifest.json` 钉住的 python-build-standalone 独立解释器解包，
-   用 `uv` 按上游 `uv.lock` 装依赖，再编译中文检索扩展（用户机器上不再需要 C 编译器）。
+   用 `uv` 按上游 `uv.lock` 装依赖，再编译中文检索扩展（用户机器上不再需要 C 编译器）；
+   `make_icon.py` 用前端产物里的 1024 母版做圆角遮罩，生成 `AppIcon.icns`。
 4. `fetch_resources.py` 同步 `sites` 原生扩展与站点数据包，这两个文件不在后端 git 里。
 
 装完用包内解释器跑一遍 `import app.main` 验收，预编译字节码，逐个签名内嵌二进制，

@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var baseURL = URL(string: "http://127.0.0.1:3000/")!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if !headless { buildMainMenu() }
         let layout = BundleLayout.current()
         mode = PortAllocator.resolve(
             backend: envPort("MOVPILOT_BACKEND_PORT", default: 3001),
@@ -89,8 +90,93 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         window.contentView = webView
         window.center()
         window.setFrameAutosaveName("MoviePilotMainWindow")
+        window.initialFirstResponder = webView
         window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(webView)
         NSApp.activate(ignoringOtherApps: true)
+        // 自检：编辑动作能否沿响应链走到网页（熄屏、无头下也能验证）
+        if ProcessInfo.processInfo.environment["MOVPILOT_CHECK_EDIT"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                let responder = self.window.firstResponder
+                NSLog("[界面] 活动 \(NSApp.isActive)，keyWindow \(NSApp.keyWindow != nil)，"
+                    + "firstResponder \(String(describing: type(of: responder)))")
+                NSLog("[界面] WebView 支持 paste: \(self.webView?.responds(to: Selector(("paste:"))) ?? false)")
+                NSRunningApplication.current.activate(options: [.activateAllWindows])
+                for name in ["paste:", "selectAll:"] {
+                    NSLog("[界面] \(name) 可达 \(NSApp.sendAction(Selector((name)), to: nil, from: nil))，"
+                        + "活动 \(NSApp.isActive)")
+                }
+            }
+        }
+    }
+
+    /// 标准主菜单。网页里的剪切板操作全靠这一组标准选择器：
+    /// 没有 Edit 菜单就没有 ⌘X/⌘C/⌘V，WebKit 拼右键菜单时也按这些项来，
+    /// 结果就是登录页连粘贴都点不出来。
+    private func buildMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = mainMenu.addItem(withTitle: "MoviePilot", action: nil, keyEquivalent: "")
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "关于 MoviePilot",
+                        action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        let servicesItem = appMenu.addItem(withTitle: "服务", action: nil, keyEquivalent: "")
+        let services = NSMenu()
+        servicesItem.submenu = services
+        NSApp.servicesMenu = services
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "隐藏 MoviePilot",
+                        action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "隐藏其他",
+                                         action: #selector(NSApplication.hideOtherApplications(_:)),
+                                         keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "全部显示",
+                        action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "退出 MoviePilot",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let editItem = mainMenu.addItem(withTitle: "编辑", action: nil, keyEquivalent: "")
+        let edit = NSMenu(title: "编辑")
+        editItem.submenu = edit
+        edit.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let pastePlain = edit.addItem(withTitle: "粘贴并匹配样式",
+                                      action: Selector(("pasteAsPlainText:")), keyEquivalent: "v")
+        pastePlain.keyEquivalentModifierMask = [.command, .option, .shift]
+        edit.addItem(withTitle: "删除", action: #selector(NSText.delete(_:)), keyEquivalent: "")
+        edit.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let viewItem = mainMenu.addItem(withTitle: "显示", action: nil, keyEquivalent: "")
+        let view = NSMenu(title: "显示")
+        viewItem.submenu = view
+        let reloadItem = view.addItem(withTitle: "重新载入", action: #selector(reload), keyEquivalent: "r")
+        reloadItem.target = self
+        let homeItem = view.addItem(withTitle: "回到入口", action: #selector(openInterface), keyEquivalent: "H")
+        homeItem.target = self
+        view.addItem(.separator())
+        view.addItem(withTitle: "进入全屏幕",
+                     action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+            .keyEquivalentModifierMask = [.control, .command]
+
+        let windowItem = mainMenu.addItem(withTitle: "窗口", action: nil, keyEquivalent: "")
+        let windowMenu = NSMenu(title: "窗口")
+        windowItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "最小化",
+                           action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "关闭",
+                           action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func buildStatusItem() {
@@ -152,6 +238,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     // MARK: - 菜单动作
 
     @objc private func reload() { webView?.reload() }
+
+    @objc private func openInterface() { loadInterface() }
 
     @objc private func toggleService() {
         guard let supervisor else { return }

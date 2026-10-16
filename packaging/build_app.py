@@ -84,6 +84,8 @@ def assemble(out: Path, short_version: str, build_version: str, appcast_url: str
     shutil.copy2(binary, contents / "MacOS" / "MoviePilotHost")
     shutil.copytree(ROOT / "pythonhost" / "mpweb", resources / "pythonhost" / "mpweb")
     shutil.copy2(PACKAGING / "MoviePilot.entitlements", resources / "MoviePilot.entitlements")
+    if (PACKAGING / "AppIcon.icns").is_file():
+        shutil.copy2(PACKAGING / "AppIcon.icns", resources / "AppIcon.icns")
     write_info_plist(contents, short_version, build_version, appcast_url)
     return app
 
@@ -192,6 +194,14 @@ def build_release(args, out: Path) -> Path:
             "cpu": rl.host_cpu(),
             "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        # 图标跟着上游前端走，上游换了 logo 下一次组包就同步
+        master = resources / "web" / "pwa-1024x1024.png"
+        if master.is_file():
+            run(sys.executable, PACKAGING / "make_icon.py", "--source", master,
+                "--out", resources / "AppIcon.icns")
+        elif not (resources / "AppIcon.icns").is_file():
+            raise SystemExit("既没有前端母版也没有 packaging/AppIcon.icns，应用会没有图标")
 
         rl.log("预编译字节码")
         run(resources / "runtime" / "bin" / "python3", "-m", "compileall", "-q",
