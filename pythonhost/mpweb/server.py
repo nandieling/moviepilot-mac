@@ -17,7 +17,7 @@ from pathlib import Path
 import uvicorn
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.requests import Request
+from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
@@ -128,7 +128,12 @@ class ProxyEndpoint:
 
     async def __call__(self, scope, receive, send) -> None:
         request = Request(scope, receive)
-        response = await self._proxy.handle(request)
+        try:
+            response = await self._proxy.handle(request)
+        except ClientDisconnect:
+            # 页面跳转或用户中断时 WebView 会掐掉连接，读请求体失败不算故障，
+            # 回不了响应也没人等，整段堆栈打进日志只会盖掉真正要紧的行。
+            return
         await response(scope, receive, send)
 
 
