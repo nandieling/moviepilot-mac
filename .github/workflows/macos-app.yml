@@ -53,15 +53,9 @@ jobs:
         run: python3 packaging/build_app.py --tag "${{ needs.decide.outputs.tag }}" --backend-repo upstream --dmg
 
       - name: 启动自检
-        run: |
-          config=$(mktemp -d)
-          MOVPILOT_BACKEND_PORT=3201 MOVPILOT_FRONTEND_PORT=3200 CONFIG_DIR="$config" \
-            dist/MoviePilot.app/Contents/MacOS/MoviePilotHost --headless &
-          host=$!
-          python3 packaging/smoke_test.py --url http://127.0.0.1:3200 --wait 180
-          kill -TERM $host
-          sleep 5
-          [ -z "$(lsof -nP -iTCP:3200 -iTCP:3201 -sTCP:LISTEN -t)" ] || { echo "退出后仍有残留监听"; exit 1; }
+        # 跑包内没有 CLI 版仓库，脚本自动改测整包产物：就绪耗时、接口冒烟、
+        # 插件目录重定位、TERM/KILL 后不留残留监听。
+        run: packaging/lifecycle_check.sh
 
       - uses: actions/upload-artifact@v4
         with:

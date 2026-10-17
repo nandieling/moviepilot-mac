@@ -6,7 +6,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEV_ROOT="${1:-$HOME/MoviePilot}"
 BACKEND_PORT="${MOVPILOT_BACKEND_PORT:-3201}"
 FRONTEND_PORT="${MOVPILOT_FRONTEND_PORT:-3200}"
-APP="$ROOT/dist/MoviePilot.app/Contents/MacOS/MoviePilotHost"
+APP_BUNDLE="$ROOT/dist/MoviePilot.app"
+APP="$APP_BUNDLE/Contents/MacOS/MoviePilotHost"
 LOGDIR="${TMPDIR:-/tmp}/moviepilot-lifecycle"
 FAILED=0
 
@@ -38,8 +39,8 @@ dump_logs() { # 失败时把宿主与两段子进程的日志留在固定位置�
 # MoviePilot 会改写进程标题，按进程名找不到残留，一律按端口归属处理。
 listening_on() { lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | tr '\n' ' '; }
 
-pkill -9 -f "MacOS/MoviePilotHost" 2>/dev/null
-pkill -9 -f "mpweb" 2>/dev/null
+# 只清理本轮要测的那份包，同一台机器上可能还跑着用户自己装的正式实例。
+pkill -9 -f "$APP_BUNDLE/Contents/MacOS" 2>/dev/null
 for port in $BACKEND_PORT $FRONTEND_PORT; do
   for pid in $(listening_on "$port"); do kill -9 "$pid" 2>/dev/null; done
 done
@@ -49,14 +50,24 @@ for port in $BACKEND_PORT $FRONTEND_PORT; do
   [ -n "$busy" ] && { echo "端口 $port 已被 $busy 占用，先释放再测"; exit 1; }
 done
 rm -rf "$LOGDIR"; mkdir -p "$LOGDIR"
-python3 "$ROOT/packaging/build_app.py" --dev-root "$DEV_ROOT" >/tmp/moviepilot-build.log 2>&1 || { tail -5 /tmp/moviepilot-build.log; exit 1; }
+# CLI 版仓库在不在决定测哪一份：在就借用它当运行时秒级出包，不在就测已组好的整包。
+if [ -x "$DEV_ROOT/venv/bin/python" ]; then
+  APP_MODE=dev
+  DEV_ROOT_ENV="$DEV_ROOT"
+  python3 "$ROOT/packaging/build_app.py" --dev-root "$DEV_ROOT" >/tmp/moviepilot-build.log 2>&1 || { tail -5 /tmp/moviepilot-build.log; exit 1; }
+else
+  APP_MODE=packaged
+  DEV_ROOT_ENV=""
+  [ -x "$APP" ] || { echo "既没有 $DEV_ROOT 这份 CLI 仓库，也没有 $APP_BUNDLE，先跑一次发布组包"; exit 1; }
+  echo "CLI 仓库不可用，改测整包产物：$APP_BUNDLE"
+fi
 
 for signal in TERM KILL; do
   echo "=== 宿主收到 $signal ==="
   # 每轮全新的数据目录：上一轮写下的配置/锁不能影响这一轮的启动耗时。
   CONFIG=$(mktemp -d)
   # MOVPILOT_PORT_PERSIST=0：禁掉端口记忆，保证应用真的用脚本指定的端口。
-  MOVPILOT_DEV_ROOT="$DEV_ROOT" CONFIG_DIR="$CONFIG" MOVPILOT_PORT_PERSIST=0 \
+  MOVPILOT_DEV_ROOT="$DEV_ROOT_ENV" CONFIG_DIR="$CONFIG" MOVPILOT_PORT_PERSIST=0 \
   MOVPILOT_BACKEND_PORT=$BACKEND_PORT MOVPILOT_FRONTEND_PORT=$FRONTEND_PORT \
     "$APP" --headless >"$LOGDIR/$signal.host.log" 2>&1 &
   HOST=$!
@@ -73,6 +84,14 @@ for signal in TERM KILL; do
   echo "  就绪耗时：$((SECONDS - READY_AT))s"
   if ! python3 "$ROOT/packaging/smoke_test.py" --url "http://127.0.0.1:$FRONTEND_PORT" --wait 30 | tail -1; then
     dump_logs "$signal" "$CONFIG"; FAILED=1
+  fi
+  if [ "$APP_MODE" = packaged ]; then
+    LINK="$APP_BUNDLE/Contents/Resources/app/app/plugins"
+    if [ "$(readlink "$LINK")" = "$CONFIG/plugin_packages" ]; then
+      echo "  插件目录已重定位到数据目录"
+    else
+      echo "  插件目录未指向本轮数据目录：$(ls -ld "$LINK" 2>&1)"; FAILED=1
+    fi
   fi
   kill -"$signal" $HOST 2>/dev/null
   START=$SECONDS

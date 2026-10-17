@@ -167,6 +167,10 @@ def build_release(args, out: Path) -> Path:
 
         rl.log("装入后端源码")
         shutil.copytree(src, resources / "app")
+        # 插件目录首启会被换成指向数据目录的软链，留一份出厂包标记好让数据目录清空后能自愈。
+        marker = resources / "app" / "app" / "plugins" / "__init__.py"
+        if marker.is_file():
+            shutil.copy2(marker, resources / "plugin-package-init.py")
         rl.log("取前端产物")
         run(sys.executable, PACKAGING / "fetch_frontend.py", "--tag", frontend_tag,
             "--dest", resources / "web", "--cache-dir", args.cache_dir)

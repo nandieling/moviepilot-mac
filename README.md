@@ -29,11 +29,17 @@ packaging/lifecycle_check.sh ~/MoviePilot              # 界面可用 + 退出�
 MOVPILOT_DEV_ROOT=~/MoviePilot open dist/MoviePilot.app
 ```
 
+CLI 版仓库不在（本机就已卸载）时，`lifecycle_check.sh` 自动改测 `dist/MoviePilot.app` 整包，
+并额外断言包内插件目录已重定向到数据目录 —— 两种模式跑同一套就绪、冒烟、退出无孤儿检查。
+
 ## 发布组包
 
 ```
-python3 packaging/build_app.py --tag v3.1.6 --backend-repo ~/MoviePilot --dmg
+git clone --depth 1 --branch v3.1.6 https://github.com/jxxghp/MoviePilot .cache/upstream
+python3 packaging/build_app.py --tag v3.1.6 --backend-repo .cache/upstream --dmg
 ```
+
+取源码用的仓库由 `--backend-repo` 指定，自己留一份缓存即可，不依赖机器上有没有装 CLI 版。
 
 四步各自独立、都有缓存，重跑一次约两分钟：
 
@@ -55,13 +61,26 @@ arm64 产物：`MoviePilot.app` 732 MB，`MoviePilot-v3.1.6-arm64.dmg` 455 MB（
 
 ```
 MoviePilot.app/Contents/Resources/
-  runtime/     内嵌 CPython 与冻结依赖（发布模式产出）
-  app/         上游后端源码（按 tag 取）
-  web/         前端 dist（按 version.py 声明的配套版本取）
-  pythonhost/  本仓库的托管层
+  runtime/             内嵌 CPython 与冻结依赖（发布模式产出）
+  app/                 上游后端源码（按 tag 取）
+  web/                 前端 dist（按 version.py 声明的配套版本取）
+  pythonhost/          本仓库的托管层
+  plugin-package-init.py  插件包标记的出厂副本，见下节
 ```
 
 数据目录沿用 `~/Library/Application Support/MoviePilot`，CLI 版用户可直接继承已有 `user.db`、插件与 Cookie。
+
+## 插件目录
+
+上游把插件市场安装的插件写进「程序目录/app/plugins」，而应用版的程序目录在 .app 里面，
+换一版软件就等于把用户自装的插件一起换掉。`PluginStore` 在起进程之前把这个路径换成指向
+`<数据目录>/plugin_packages` 的软链：上游照旧往那个名字写，插件却活在整包升级之外，
+插件字节码也不再写进包内。
+
+- 首启把包内目录（含上一版留下的用户插件）搬进数据目录，再建软链；两边同名以数据目录为准。
+- 换数据目录（含测试用的临时目录）时重新接链，软链断掉也能自愈。
+- 数据目录被清空时用 `plugin-package-init.py` 补回 `app/plugins/__init__.py`，
+  `import app.plugins` 不会因此断掉；缺的插件下次启动按数据库里的安装记录自动从市场拉回。
 
 ## 与 CLI 版共存
 

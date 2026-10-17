@@ -61,6 +61,8 @@ final class ServiceSupervisor {
             return
         }
         try? FileManager.default.createDirectory(at: layout.logDir, withIntermediateDirectories: true)
+        // 先接好插件目录再起进程：后端一启动就会往那个路径装插件。
+        PluginStore.prepare(layout: layout)
 
         var environment = ProcessInfo.processInfo.environment
         environment["CONFIG_DIR"] = layout.configDir.path

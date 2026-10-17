@@ -11,6 +11,8 @@ struct BundleLayout {
     let python: URL
     let configDir: URL
     let logDir: URL
+    /// 是否跑在正式包里：开发态那份是用户自己的 git 工作区，不往里塞软链。
+    let isPackaged: Bool
 
     static let bundleIdentifier = "org.moviepilot.app"
 
@@ -31,7 +33,8 @@ struct BundleLayout {
                 pythonHost: resources.appendingPathComponent("pythonhost"),
                 python: root.appendingPathComponent("venv/bin/python"),
                 configDir: configDir,
-                logDir: configDir.appendingPathComponent("logs")
+                logDir: configDir.appendingPathComponent("logs"),
+                isPackaged: false
             )
         }
         let runtime = resources.appendingPathComponent("runtime")
@@ -41,8 +44,16 @@ struct BundleLayout {
             pythonHost: resources.appendingPathComponent("pythonhost"),
             python: runtime.appendingPathComponent("bin/python3"),
             configDir: configDir,
-            logDir: configDir.appendingPathComponent("logs")
+            logDir: configDir.appendingPathComponent("logs"),
+            isPackaged: true
         )
+    }
+
+    /// 包外的插件仓库，由 PluginStore 接上上游认的那个路径。
+    var pluginMirror: URL { configDir.appendingPathComponent("plugin_packages") }
+    /// 出厂那份插件包标记的副本：数据目录被清空时靠它把 `app.plugins` 重新撑起来。
+    var pluginPackageSeed: URL {
+        pythonHost.deletingLastPathComponent().appendingPathComponent("plugin-package-init.py")
     }
 
     /// 传给两个子进程的 PYTHONPATH：只需随包的托管层。
