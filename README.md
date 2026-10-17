@@ -36,7 +36,7 @@ CLI 版仓库不在（本机就已卸载）时，`lifecycle_check.sh` 自动改�
 
 ```
 git clone --depth 1 --branch v3.1.6 https://github.com/jxxghp/MoviePilot .cache/upstream
-python3 packaging/build_app.py --tag v3.1.6 --backend-repo .cache/upstream --dmg
+python3 packaging/build_app.py --tag v3.1.6 --backend-repo .cache/upstream --dmg --delta
 ```
 
 取源码用的仓库由 `--backend-repo` 指定，自己留一份缓存即可，不依赖机器上有没有装 CLI 版。
@@ -81,6 +81,9 @@ MoviePilot.app/Contents/Resources/
 - 换数据目录（含测试用的临时目录）时重新接链，软链断掉也能自愈。
 - 数据目录被清空时用 `plugin-package-init.py` 补回 `app/plugins/__init__.py`，
   `import app.plugins` 不会因此断掉；缺的插件下次启动按数据库里的安装记录自动从市场拉回。
+- 接完软链之后 `codesign --verify --deep --strict` 会对这个包报
+  「invalid destination for symbolic link in bundle」：`--deep` 遍历到指向包外的软链就判失败。
+  出厂那份（还是真实目录）校验是干净的，签名本身没坏，重新签名也不受影响。
 
 ## 与 CLI 版共存
 
@@ -111,11 +114,37 @@ GET 响应直接写盘，而 `Cache-Control: no-store` 拦不住这个写入 —
 
 旧缓存是注册前那一次留下的，清一次就干净：菜单 显示 ▸ 清空界面缓存并重载（⌥⌘R）。
 
+## 更新
+
+上游 v3 的更新分 `application` 与 `resources` 两类，检查、下载、校验在应用版里照常跑，
+载荷落在数据目录 `temp/moviepilot-update/`；但替换程序目录那步只认 Docker ——
+`apply_prepared_update()` 开头就是 `is_docker()` 守卫，CLI 的 `apply-prepared-update` 同。
+受管重启 `SystemHelper.can_restart()` 也只认 Docker 的 supervisor、CLI 状态文件和 Windows。
+界面里的按钮要有人接活，所以 Docker 里那个 root 更新 worker 在应用版拆成了三段：
+
+1. 托管层拦下 `GET /api/v1/system/restart`，写一份投递文件
+   （`temp/mpweb/host-request.json`）就回成功。没带登录凭证的请求原样转给后端，按常规回 401。
+2. `UpdateCoordinator` 每两秒取件：只是重启就换两个子进程；数据目录里有 `install.json`
+   就说明这次要顺带装更新，于是拉起包内 `python -m mpweb.updater apply-staged --relaunch`
+   并交代它等自己退出，然后本进程退场 —— 主程序的可执行文件会被重新签名，
+   进程还活着就会被系统连代码页一起作废。
+3. `mpweb/updater.py` 落地：按清单校验 sha256、解压、换 `Resources/app` 与 `Resources/web`、
+   把旧包的 `sites.*.so` 与 `user.sites.v3.bin` 带进新包（上游后端包不含这两个文件）、
+   把 `app/plugins` 重新接成指向数据目录的软链、重写 `build-info.json`、整包重新签名，
+   最后把应用叫回来。流水账在 `logs/update.log`，失败时包还是原来那份。
+
+包内 `uv.lock` 摘要与装好的运行时对不上时更新器直接拒绝：那不是换源码能解决的事，
+硬换上去只会起不来，这种版本得装完整安装包。`--ignore-lock-change` 留给排查用。
+
+自己发增量更新不必带上 605 MB 运行时：`packaging/build_delta.py` 从组装好的包里切出
+`MoviePilot-<版本>-<架构>-appweb.zip`，v3.1.6 实测 55 MB（整包 dmg 459 MB），
+由 `mpweb.updater apply-zip --zip <该包>` 消费。分发通道还没接，目前只能本地验一遍。
+
 ## 已知缺口
 
 - 签名目前只有 ad-hoc：换 Developer ID 证书 + 公证只需给 `build_app.py --identity`，
   但内嵌 572 个二进制的逐层签名要在真证书下再验一遍。
-- Sparkle 更新通道未接，appcast 地址是占位值。
+- 更新缺的是分发通道：落地与重启已经接上，appcast 地址还是占位值，增分包暂时没有地方发。
 - 首屏之后的首次设置页直接用上游前端自带的 `/initialize`，无需自建向导。
 - 内嵌运行时占了 605 MB，其中 langchain/boto3 等可选 SDK 可以按插件需要再裁一轮。
 - `build_runtime.py` 每次组包都重新解包解释器，CI 上可加 `--reuse-runtime` 跳过。

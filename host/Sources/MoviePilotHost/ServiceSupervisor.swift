@@ -54,6 +54,9 @@ final class ServiceSupervisor {
     func start() { queue.sync { startLocked() } }
     func stop() { queue.sync { stopLocked() } }
 
+    /// 界面里的重启：只换两个子进程，应用本体和窗口都不动。
+    func restart() { queue.sync { stopLocked(); startLocked() } }
+
     private func startLocked() {
         guard !isRunning else { return }
         Self.raiseFileDescriptorLimit()
@@ -72,6 +75,8 @@ final class ServiceSupervisor {
         environment["NGINX_PORT"] = String(frontendPort)
         environment["MOVIEPILOT_WEB_ROOT"] = layout.webRoot.path
         environment["MOVPILOT_HOST_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        // 托管层把「重启系统」这类动作投递到这里，由 UpdateCoordinator 取件执行。
+        environment["MOVPILOT_HOST_REQUEST_FILE"] = layout.hostRequestFile.path
         environment["PYTHONPATH"] = layout.pythonPath()
         environment.removeValue(forKey: "PYTHONHOME")
         // 子进程输出重定向到文件时默认块缓冲，异常退出会丢掉最后几行

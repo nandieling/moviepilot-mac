@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -104,6 +107,19 @@ class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
         self.client = httpx.AsyncClient(
             transport=self.transport, base_url="http://local.test"
         )
+        # 应用版里托管层知道数据目录在哪，重启请求才有人接；测试按同样的形态摆好。
+        self.config_dir = self.web_root.parent / f"config-{self._testMethodName}"
+        self.request_file = self.config_dir / "temp" / "mpweb" / "host-request.json"
+        environment = mock.patch.dict(
+            os.environ,
+            {
+                "CONFIG_DIR": str(self.config_dir),
+                "MOVPILOT_HOST_REQUEST_FILE": str(self.request_file),
+            },
+        )
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.addCleanup(lambda: shutil.rmtree(self.config_dir, ignore_errors=True))
 
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
@@ -205,6 +221,28 @@ class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
         await dead.close()
         self.assertEqual(response.status_code, 502)
         self.assertFalse(response.json()["success"])
+
+    async def test_restart_is_handed_to_the_host(self) -> None:
+        response = await self.client.get(
+            "/api/v1/system/restart", headers={"Cookie": "moviepilot=1"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+        self.assertEqual(json.loads(self.request_file.read_text())["action"], "restart")
+
+    async def test_restart_installs_a_staged_update_when_one_is_waiting(self) -> None:
+        staged = self.config_dir / "temp" / "moviepilot-update"
+        staged.mkdir(parents=True)
+        (staged / "install.json").write_text('{"targets": ["application"]}', encoding="utf-8")
+        response = await self.client.get(
+            "/api/v1/system/restart", headers={"Cookie": "moviepilot=1"}
+        )
+        self.assertTrue(response.json()["success"])
+        self.assertEqual(json.loads(self.request_file.read_text())["action"], "update")
+
+    async def test_restart_without_credentials_still_reaches_the_backend(self) -> None:
+        await self.client.get("/api/v1/system/restart")
+        self.assertEqual(SEEN["path"], "/api/v1/system/restart")
 
 
 class WatchdogTestCase(unittest.IsolatedAsyncioTestCase):

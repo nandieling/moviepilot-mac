@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release_lib as rl
+import build_delta
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGING = ROOT / "packaging"
@@ -217,6 +218,8 @@ def build_release(args, out: Path) -> Path:
         rl.log(f"发布包：{app}（{rl.dir_size_mb(app)} MB）")
         if args.dmg:
             make_dmg(app, out)
+        if args.delta:
+            build_delta.build_delta(app, out)
         return app
 
 
@@ -233,6 +236,7 @@ def main() -> int:
     parser.add_argument("--appcast-url", default="https://moviepilot.org/appcast/stable.xml")
     parser.add_argument("--identity", default="-", help="codesign 身份，默认 ad-hoc")
     parser.add_argument("--dmg", action="store_true", help="顺手产出可拖拽安装的 dmg")
+    parser.add_argument("--delta", action="store_true", help="顺手产出前后端增分包")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)

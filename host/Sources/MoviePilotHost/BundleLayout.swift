@@ -11,6 +11,8 @@ struct BundleLayout {
     let python: URL
     let configDir: URL
     let logDir: URL
+    /// .app 自身的位置：更新落地时要整包重新签名。
+    let bundleURL: URL
     /// 是否跑在正式包里：开发态那份是用户自己的 git 工作区，不往里塞软链。
     let isPackaged: Bool
 
@@ -18,6 +20,8 @@ struct BundleLayout {
 
     static func current(bundle: Bundle = .main) -> BundleLayout {
         let resources = bundle.resourceURL ?? URL(fileURLWithPath: "/")
+        // Contents/Resources 往上两级就是 .app 本体。
+        let bundleURL = resources.deletingLastPathComponent().deletingLastPathComponent()
         // 沿用上游同名环境变量：既能继承 CLI 版的既有数据目录，也方便测试指到临时目录。
         let configured = (ProcessInfo.processInfo.environment["CONFIG_DIR"] ?? "").trimmingCharacters(in: .whitespaces)
         let configDir = configured.isEmpty
@@ -34,6 +38,7 @@ struct BundleLayout {
                 python: root.appendingPathComponent("venv/bin/python"),
                 configDir: configDir,
                 logDir: configDir.appendingPathComponent("logs"),
+                bundleURL: bundleURL,
                 isPackaged: false
             )
         }
@@ -45,12 +50,17 @@ struct BundleLayout {
             python: runtime.appendingPathComponent("bin/python3"),
             configDir: configDir,
             logDir: configDir.appendingPathComponent("logs"),
+            bundleURL: bundleURL,
             isPackaged: true
         )
     }
 
     /// 包外的插件仓库，由 PluginStore 接上上游认的那个路径。
     var pluginMirror: URL { configDir.appendingPathComponent("plugin_packages") }
+    /// 托管层投递动作请求的位置：界面里的重启、安装更新都从这里过。
+    var hostRequestFile: URL { configDir.appendingPathComponent("temp/mpweb/host-request.json") }
+    /// 更新流水账。
+    var updateLog: URL { logDir.appendingPathComponent("update.log") }
     /// 出厂那份插件包标记的副本：数据目录被清空时靠它把 `app.plugins` 重新撑起来。
     var pluginPackageSeed: URL {
         pythonHost.deletingLastPathComponent().appendingPathComponent("plugin-package-init.py")

@@ -5,6 +5,7 @@ import WebKit
 /// 应用外壳：窗口、菜单栏、服务生命周期与诊断入口。
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var supervisor: ServiceSupervisor?
+    private var coordinator: UpdateCoordinator?
     private var window: NSWindow!
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
@@ -34,10 +35,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             let supervisor = ServiceSupervisor(layout: layout, backendPort: backendPort, frontendPort: frontendPort)
             supervisor.onStateChange = { [weak self] state in self?.render(state) }
             self.supervisor = supervisor
+            // 界面里的重启与安装更新都从这里过手；换载荷要等本进程退出后进行。
+            coordinator = UpdateCoordinator(layout: layout, supervisor: supervisor) {
+                NSApp.terminate(nil)
+            }
         }
         buildStatusItem()
         if !headless { buildWindow() }
         supervisor?.start() ?? loadInterface()
+        coordinator?.start()
     }
 
     /// 附加模式下没有子进程，界面直接加载。
@@ -193,6 +199,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         menu.addItem(.separator())
         startButton = menu.addItem(withTitle: "启动服务", action: #selector(toggleService), keyEquivalent: "")
         startButton?.target = self
+        let restartService = menu.addItem(withTitle: "重启后台服务", action: #selector(restartService), keyEquivalent: "")
+        restartService.target = self
+        restartService.isHidden = supervisor == nil
         menu.addItem(withTitle: "打开日志目录", action: #selector(openLogDir), keyEquivalent: "").target = self
         menu.addItem(withTitle: "运行诊断", action: #selector(runDiagnostics), keyEquivalent: "d").target = self
         menu.addItem(.separator())
@@ -250,6 +259,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     // MARK: - 菜单动作
 
     @objc private func reload() { webView?.reload() }
+
+    @objc private func restartService() { supervisor?.restart() }
 
     @objc private func openInterface() { loadInterface() }
 

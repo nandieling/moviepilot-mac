@@ -7,15 +7,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -31,6 +34,55 @@ REVALIDATED = frozenset({"service-worker.js", "version.txt"})
 # 替身 Service Worker 的脚本源。
 SERVICE_WORKER_STUB = Path(__file__).with_name("sw-stub.js")
 SERVICE_WORKER_PATH = "/service-worker.js"
+
+# 界面里的「重启系统」：上游的受管重启只认 Docker 与 CLI 状态文件，应用版由宿主执行。
+RESTART_PATH = "/api/v1/system/restart"
+REQUEST_FILE_ENV = "MOVPILOT_HOST_REQUEST_FILE"
+
+
+def _config_dir() -> Path | None:
+    configured = (os.environ.get("CONFIG_DIR") or "").strip()
+    return Path(configured).expanduser() if configured else None
+
+
+def host_request_file() -> Path | None:
+    """宿主取动作请求的文件路径；连数据目录都不知道就说明这层不在应用里跑。"""
+    configured = (os.environ.get(REQUEST_FILE_ENV) or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    config_dir = _config_dir()
+    if config_dir is not None:
+        return config_dir / "temp" / "mpweb" / "host-request.json"
+    return None
+
+
+def request_host_restart() -> str | None:
+    """把重启请求交给宿主并交代它做什么；载荷已下载待安装时顺带让它落地更新。"""
+    target = host_request_file()
+    if target is None:
+        return None
+    config_dir = _config_dir()
+    staged = (
+        config_dir / "temp" / "moviepilot-update" / "install.json"
+        if config_dir is not None
+        else None
+    )
+    action = "update" if staged is not None and staged.is_file() else "restart"
+    payload = json.dumps(
+        {"action": action, "requested_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
+        ensure_ascii=False,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=target.parent, prefix=".request-", delete=False
+    )
+    try:
+        handle.write(payload)
+        handle.flush()
+    finally:
+        handle.close()
+    os.replace(handle.name, target)
+    return action
 
 
 class SpaStaticFiles(StaticFiles):
@@ -104,8 +156,32 @@ async def _service_worker_request(request: Request) -> Response:
     return response
 
 
+CREDENTIAL_HEADERS = ("cookie", "authorization", "x-api-key")
+
+
+def restart_endpoint(proxy: BackendProxy):
+    """接管界面的重启按钮：后端自己既不会重启，也不会替换程序目录。
+
+    没有登录凭证的请求原样转给后端，让它按常规回 401，免得本地任意页面都能戳重启。
+    """
+
+    async def handler(request: Request) -> Response:
+        if host_request_file() is None or not any(
+            request.headers.get(name) for name in CREDENTIAL_HEADERS
+        ):
+            return await proxy.handle(request)
+        action = request_host_restart()
+        message = "更新已排入本次重启" if action == "update" else "正在重启服务"
+        return JSONResponse({"success": True, "message": message, "data": None})
+
+    return handler
+
+
 def create_app(*, web_root: Path, proxy: BackendProxy) -> Starlette:
-    routes = [Mount(path, app=ProxyEndpoint(proxy)) for path in PROXY_MOUNTS]
+    routes: list[Mount | Route] = [
+        Route(RESTART_PATH, endpoint=restart_endpoint(proxy), methods=["GET"]),
+    ]
+    routes += [Mount(path, app=ProxyEndpoint(proxy)) for path in PROXY_MOUNTS]
     if service_worker_response() is not None:
         # 路由排在静态挂载之前：这个路径由托管层接管，不再回落到前端自带的那份。
         routes.append(Route(SERVICE_WORKER_PATH, endpoint=_service_worker_request))
