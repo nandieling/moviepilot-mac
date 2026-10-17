@@ -199,6 +199,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         statusItem.menu = menu
     }
 
+    /// 界面载入完成的时刻；早于后端本轮启动时刻就说明这一页属于上一个实例。
+    private var interfaceLoadedAt: Date?
+
     private func render(_ state: ServiceSupervisor.State) {
         switch state {
         case .starting:
@@ -208,6 +211,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             statusLabel.stringValue = "服务运行中 · \(baseURL.absoluteString)"
             startButton?.title = "停止服务"
             if webView != nil, webView.url == nil { loadInterface() }
+            // 后端重启过就把这一页丢掉：页面里缓存的初始化状态、登录态都属于上一个实例。
+            if let started = supervisor?.backendStartedAt, let loaded = interfaceLoadedAt, started > loaded {
+                loadInterface()
+            }
             if case .attached(let url) = mode { statusLabel.stringValue = "已连接到运行中的实例 · \(url.absoluteString)" }
         case .stopped:
             statusLabel.stringValue = "服务已停止"
@@ -301,6 +308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         loadDeadline = .distantPast
+        interfaceLoadedAt = Date()
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {

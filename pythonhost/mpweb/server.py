@@ -24,6 +24,9 @@ from .watchdog import BackendWatchdog, guard_parent_death
 # 后端同源入口，与 public/service.js 的代理前缀保持一致。
 PROXY_MOUNTS: tuple[str, ...] = ("/api", "/cookiecloud")
 
+# 必须每次回源的文件名。
+REVALIDATED = frozenset({"service-worker.js", "version.txt"})
+
 
 class SpaStaticFiles(StaticFiles):
     """命中静态资源就按哈希分级缓存，未命中的 GET 回退 index.html。
@@ -49,7 +52,10 @@ class SpaStaticFiles(StaticFiles):
     @staticmethod
     def _cache_control(fullpath: str) -> str:
         normalized = str(fullpath).replace("\\", "/")
-        if normalized.endswith("index.html"):
+        name = normalized.rsplit("/", 1)[-1]
+        # 入口、SW 脚本、版本号文件任何一样被缓存，前端就会拿旧状态当现状：
+        # 前者会跳过首次设置页，后两者会让版本比对误报「缓存版本不一致」。
+        if normalized.endswith("index.html") or name in REVALIDATED or name.endswith(".webmanifest"):
             return "no-cache"
         if "/assets/" in normalized:
             # Vite 产物自带内容哈希，可以放心长期不可变缓存。

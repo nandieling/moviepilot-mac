@@ -93,11 +93,21 @@ MoviePilot.app/Contents/Resources/
 环境变量：`MOVPILOT_FRONTEND_PORT`、`MOVPILOT_BACKEND_PORT` 指定首选端口；`MOVPILOT_PORT_PERSIST=0`
 关闭端口记忆（测试脚本用，保证每次都用指定端口）。
 
+## 缓存策略
+
+托管层按「状态类资源一律回源」处理：同源 API 上游没写 `Cache-Control` 就补 `no-store`，
+`index.html`、`service-worker.js`、`version.txt`、`*.webmanifest` 一律 `no-cache`，
+只有带内容哈希的 `assets/` 走一年不可变缓存。
+
+这不是洁癖：WebView 把 `login/initialization` 缓存住之后，数据目录刚清空也会被判成
+「已初始化」，首次设置页直接跳过；`version.txt` 被缓存则是「缓存版本不一致」弹窗的老病根。
+宿主还记录界面载入时刻，后端本轮启动时刻晚于它就重新载入，页面不会停在旧实例的状态上。
+
 ## 已知缺口
 
 - 签名目前只有 ad-hoc：换 Developer ID 证书 + 公证只需给 `build_app.py --identity`，
   但内嵌 572 个二进制的逐层签名要在真证书下再验一遍。
 - Sparkle 更新通道未接，appcast 地址是占位值。
-- 首启向导复用上游 `init` 内部命令，界面部分待做。
+- 首屏之后的首次设置页直接用上游前端自带的 `/initialize`，无需自建向导。
 - 内嵌运行时占了 605 MB，其中 langchain/boto3 等可选 SDK 可以按插件需要再裁一轮。
 - `build_runtime.py` 每次组包都重新解包解释器，CI 上可加 `--reuse-runtime` 跳过。

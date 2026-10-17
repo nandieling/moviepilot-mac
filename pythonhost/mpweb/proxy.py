@@ -36,6 +36,17 @@ BUFFERED_BODY_LIMIT = 1024 * 1024
 _BODYLESS_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
+def apply_cache_policy(raw_headers: List[Tuple[bytes, bytes]]) -> List[Tuple[bytes, bytes]]:
+    """上游已经声明的缓存策略原样保留，没声明的按不缓存处理。
+
+    同源 API 一旦被 WebView 缓存住，前端就会把换库、重启之前的旧状态当成当前状态：
+    数据目录刚清空、`initialization` 返回的却还是「已初始化」，首次设置页就这样被跳过了。
+    """
+    if any(name.lower() == b"cache-control" for name, _ in raw_headers):
+        return raw_headers
+    return raw_headers + [(b"cache-control", b"no-store")]
+
+
 class BackendUnavailable(RuntimeError):
     """后端不可达，交给看门狗计数决定是否退出。"""
 
@@ -127,11 +138,13 @@ class BackendProxy:
             status_code=upstream.status_code,
         )
         # 直接写 raw_headers，保留上游同名多值首部与 Content-Length。
-        response.raw_headers = [
-            (name, value)
-            for name, value in upstream.headers.raw
-            if name.lower() not in _HOP_BY_HOP
-        ]
+        response.raw_headers = apply_cache_policy(
+            [
+                (name, value)
+                for name, value in upstream.headers.raw
+                if name.lower() not in _HOP_BY_HOP
+            ]
+        )
         response.background = BackgroundTask(self._close_upstream, upstream)
         return response
 

@@ -26,6 +26,8 @@ final class ServiceSupervisor {
     private var lastStart = Date.distantPast
 
     private(set) var state: State = .stopped
+    /// 本轮子进程的启动时刻，界面据此判断自己是不是上一页旧状态。
+    private(set) var backendStartedAt: Date?
     var onStateChange: ((State) -> Void)?
 
     init(layout: BundleLayout, backendPort: Int = 3001, frontendPort: Int = 3000) {
@@ -96,6 +98,7 @@ final class ServiceSupervisor {
         backend = backendProcess
         frontend = frontendProcess
         lastStart = Date()
+        backendStartedAt = Date()
         updateState(.running(backendPort: backendPort, frontendPort: frontendPort))
     }
 
@@ -110,6 +113,7 @@ final class ServiceSupervisor {
         }
         backend = nil
         frontend = nil
+        backendStartedAt = nil
         updateState(.stopped)
     }
 

@@ -84,6 +84,8 @@ class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
         cls.tmp = TemporaryDirectory()
         root = Path(cls.tmp.name)
         (root / "index.html").write_text("<!doctype html>app", encoding="utf-8")
+        (root / "service-worker.js").write_text("// sw", encoding="utf-8")
+        (root / "version.txt").write_text("v9.9.9", encoding="utf-8")
         (root / "assets").mkdir()
         (root / "assets" / "index-abc123.js").write_text("console.log(1)", encoding="utf-8")
         cls.web_root = root
@@ -144,6 +146,25 @@ class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
         await self.client.get("/cookiecloud/sync")
         self.assertIn("x-forwarded-for", SEEN["headers"])
         self.assertEqual(SEEN["headers"]["x-forwarded-proto"], "http")
+
+    async def test_api_responses_are_not_cacheable(self) -> None:
+        # 后端不写 Cache-Control，代理必须补上，否则 WebView 会把旧的初始化状态当成现状。
+        response = await self.client.get("/api/v1/login/initialization")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+
+    def test_upstream_cache_policy_is_not_overridden(self) -> None:
+        from mpweb.proxy import apply_cache_policy
+
+        kept = apply_cache_policy([(b"cache-control", b"public, max-age=60")])
+        self.assertEqual(kept, [(b"cache-control", b"public, max-age=60")])
+        added = apply_cache_policy([(b"content-type", b"application/json")])
+        self.assertIn((b"cache-control", b"no-store"), added)
+
+    async def test_service_worker_and_version_are_revalidated(self) -> None:
+        for name in ("service-worker.js", "version.txt"):
+            with self.subTest(name=name):
+                response = await self.client.get(f"/{name}")
+                self.assertEqual(response.headers["cache-control"], "no-cache")
 
     async def test_index_html_is_revalidated_every_time(self) -> None:
         response = await self.client.get("/")
