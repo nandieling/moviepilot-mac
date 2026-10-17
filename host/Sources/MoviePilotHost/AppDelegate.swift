@@ -10,8 +10,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var webView: WKWebView!
     private var statusItem: NSStatusItem!
     private var startButton: NSMenuItem!
+    private var rememberPasswordItem: NSMenuItem?
     private let statusLabel = NSTextField(labelWithString: "正在启动…")
     private var loadDeadline = Date.distantPast
+    /// 界面端口探测的轮次号：过期回调直接丢弃，免得几轮探测互相踩。
+    private var probeToken = 0
+    private var failedLoads = 0
+    private var warnedAboutDelay = false
+    private var showingSplash = false
     private let headless = CommandLine.arguments.contains("--headless")
 
     private var mode: ServiceMode = .attached(URL(string: "http://127.0.0.1:3000/")!)
@@ -49,19 +55,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     /// 附加模式下没有子进程，界面直接加载。
     /// 自建服务的首屏可能在后端就绪之前发起，失败后在预算内自动重试，
     /// 否则用户只能对着空白页手动点重新载入。
-    private func loadInterface(withRetries deadline: TimeInterval = 120) {
+    /// 先顶本地启动页，探到界面端口能正常响应再整页切过去：
+    /// 子进程起来到端口就绪有一两秒，这期间直接加载只会白屏一闪一闪。
+    private func loadInterface(withBudget budget: TimeInterval = 35) {
         guard let webView else { return }
-        loadDeadline = Date().addingTimeInterval(deadline)
-        webView.load(URLRequest(url: baseURL))
+        loadDeadline = Date().addingTimeInterval(budget)
+        failedLoads = 0
+        showSplash(.starting)
+        probeToken += 1
+        probeInterface(token: probeToken)
     }
 
+    private func showSplash(_ reason: LaunchSplash.Reason) {
+        showingSplash = true
+        webView?.loadHTMLString(LaunchSplash.html(reason: reason), baseURL: nil)
+    }
+
+    private func probeInterface(token: Int) {
+        var request = URLRequest(url: baseURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2)
+        request.httpMethod = "GET"
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let ready = (200..<400).contains(status)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, token == self.probeToken, let webView = self.webView else { return }
+                if ready {
+                    // 端口通了，之前那些加载失败属于上一轮实例，不算数。
+                    self.failedLoads = 0
+                    self.showingSplash = false
+                    webView.load(URLRequest(url: self.baseURL))
+                    return
+                }
+                // 过了预算还在启动（首次装载插件能到几十秒）就把话说明白，但继续等：
+                // 后台起来页面自然会出现，没必要停在死页上让用户自己摸。
+                if Date() >= self.loadDeadline, !self.warnedAboutDelay {
+                    self.warnedAboutDelay = true
+                    self.showSplash(.timedOut)
+                    self.statusLabel.stringValue = "后台服务仍在启动"
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + (self.warnedAboutDelay ? 3 : 0.3)) { [weak self] in
+                    guard let self, token == self.probeToken else { return }
+                    self.probeInterface(token: token)
+                }
+            }
+        }.resume()
+    }
+
+    /// 页面加载失败多半是端口刚没；退回启动页继续探，连不上三次就停在提示上不再刷。
     private func retryLoad() {
-        guard Date() < loadDeadline else { return }
-        statusLabel.stringValue = "正在启动…"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self, Date() < self.loadDeadline else { return }
-            self.webView.load(URLRequest(url: self.baseURL))
+        failedLoads += 1
+        guard failedLoads < 3 else {
+            showSplash(.timedOut)
+            statusLabel.stringValue = "界面加载失败"
+            return
         }
+        statusLabel.stringValue = "正在启动…"
+        loadInterface(withBudget: max(10, loadDeadline.timeIntervalSinceNow))
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -81,29 +130,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     private func buildWindow() {
         let configuration = WKWebViewConfiguration()
+        // 登录态和上次用的用户名都存在这份持久数据仓库里；换成 nonPersistent 每次都得重登。
+        configuration.websiteDataStore = .default()
+        configuration.userContentController.addUserScript(LoginAutofill.userScript())
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1280, height: 820), configuration: configuration)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = true
 
-        window = NSWindow(
+        let made = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "MoviePilot"
-        window.titlebarAppearsTransparent = false
-        window.contentView = webView
-        window.center()
-        window.setFrameAutosaveName("MoviePilotMainWindow")
-        window.initialFirstResponder = webView
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(webView)
+        // 代码建的窗口默认「关闭即释放」，可我们这边还留着引用；关一次窗口之后再点 Dock 图标，
+        // 取到的就是已经没了的对象。改成不自动释放，窗口只是隐藏，重新显示即可。
+        made.isReleasedWhenClosed = false
+        made.title = "MoviePilot"
+        made.titlebarAppearsTransparent = false
+        made.contentView = webView
+        made.center()
+        made.setFrameAutosaveName("MoviePilotMainWindow")
+        made.initialFirstResponder = webView
+        window = made
+        made.makeKeyAndOrderFront(nil)
+        made.makeFirstResponder(webView)
         NSApp.activate(ignoringOtherApps: true)
         // 自检：编辑动作能否沿响应链走到网页（熄屏、无头下也能验证）
         if ProcessInfo.processInfo.environment["MOVPILOT_CHECK_EDIT"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                let responder = self.window.firstResponder
+                let responder = self.window?.firstResponder ?? NSApp
                 NSLog("[界面] 活动 \(NSApp.isActive)，keyWindow \(NSApp.keyWindow != nil)，"
                     + "firstResponder \(String(describing: type(of: responder)))")
                 NSLog("[界面] WebView 支持 paste: \(self.webView?.responds(to: Selector(("paste:"))) ?? false)")
@@ -202,6 +258,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let restartService = menu.addItem(withTitle: "重启后台服务", action: #selector(restartService), keyEquivalent: "")
         restartService.target = self
         restartService.isHidden = supervisor == nil
+        rememberPasswordItem = menu.addItem(withTitle: "记住登录密码", action: #selector(toggleRememberPassword), keyEquivalent: "")
+        rememberPasswordItem?.target = self
+        rememberPasswordItem?.state = remembersPassword ? .on : .off
         menu.addItem(withTitle: "打开日志目录", action: #selector(openLogDir), keyEquivalent: "").target = self
         menu.addItem(withTitle: "运行诊断", action: #selector(runDiagnostics), keyEquivalent: "d").target = self
         menu.addItem(.separator())
@@ -251,7 +310,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     @objc private func showMainWindow() {
-        guard let window else { return }
+        guard let window else {
+            buildWindow()
+            return
+        }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -271,6 +333,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             + "}) : null"
         webView?.evaluateJavaScript(script, completionHandler: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.loadInterface() }
+    }
+
+    private var remembersPassword: Bool {
+        get { UserDefaults.standard.object(forKey: "rememberLoginPassword") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "rememberLoginPassword") }
+    }
+
+    @objc private func toggleRememberPassword() {
+        remembersPassword.toggle()
+        rememberPasswordItem?.state = remembersPassword ? .on : .off
+        applyPasswordPreference()
+    }
+
+    /// 开关状态写进页面本地存储，注入脚本每次进登录页时按它决定要不要填密码。
+    private func applyPasswordPreference() {
+        let script = remembersPassword
+            ? "localStorage.setItem('MoviePilotApp.rememberPassword','1')"
+            : "localStorage.setItem('MoviePilotApp.rememberPassword','0');localStorage.removeItem('MoviePilotApp.lastPassword')"
+        webView?.evaluateJavaScript(script, completionHandler: nil)
     }
 
     @objc private func toggleService() {
@@ -334,15 +415,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         loadDeadline = .distantPast
         interfaceLoadedAt = Date()
+        failedLoads = 0
+        applyPasswordPreference()
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        // 站外链接交给系统浏览器，避免界面里跳出无关页面。
-        if let url = navigationAction.request.url, url.host != "127.0.0.1", url.host != "localhost" {
-            NSWorkspace.shared.open(url)
-            decisionHandler(.cancel)
+        // 只有真正的站外网页链接才交给系统浏览器。启动页那种 about:blank 没有主机名，
+        // 按「站外」处理会让 LaunchServices 去找「能打开 about:blank 的应用」，
+        // 弹一个「未设定用来打开 URL about:blank 的应用程序」的框，窗口还留在白屏上。
+        guard let url = navigationAction.request.url,
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, host != "127.0.0.1", host != "localhost" else {
+            decisionHandler(.allow)
             return
         }
-        decisionHandler(.allow)
+        NSWorkspace.shared.open(url)
+        decisionHandler(.cancel)
     }
 }
