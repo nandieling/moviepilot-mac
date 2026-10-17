@@ -166,6 +166,14 @@ class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
                 response = await self.client.get(f"/{name}")
                 self.assertEqual(response.headers["cache-control"], "no-cache")
 
+    async def test_service_worker_is_replaced_by_the_stub(self) -> None:
+        # 上游那份 workbox 会把接口响应冻在 CacheStorage，应用版必须换成不缓存的替身。
+        response = await self.client.get("/service-worker.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("skipWaiting", response.text)
+        # 上游那份是打包进来的 workbox，带预缓存清单；替身里没有这些。
+        self.assertNotIn("precacheAndRoute", response.text)
+
     async def test_index_html_is_revalidated_every_time(self) -> None:
         response = await self.client.get("/")
         self.assertEqual(response.headers["cache-control"], "no-cache")

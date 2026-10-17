@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from starlette.applications import Starlette
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.routing import Mount
+from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from .proxy import BackendProxy
@@ -26,6 +27,10 @@ PROXY_MOUNTS: tuple[str, ...] = ("/api", "/cookiecloud")
 
 # 必须每次回源的文件名。
 REVALIDATED = frozenset({"service-worker.js", "version.txt"})
+
+# 替身 Service Worker 的脚本源。
+SERVICE_WORKER_STUB = Path(__file__).with_name("sw-stub.js")
+SERVICE_WORKER_PATH = "/service-worker.js"
 
 
 class SpaStaticFiles(StaticFiles):
@@ -75,8 +80,35 @@ class ProxyEndpoint:
         await response(scope, receive, send)
 
 
+def service_worker_response() -> Response | None:
+    """用替身顶掉前端自带的 workbox：它的 CacheStorage 会把接口响应冻在上一次运行里。
+
+    脚本内容变了浏览器就会换 SW，替身在 activate 里清空历史缓存，
+    所以旧版本留下的过期状态会在升级后被自动带走。设 `MOVPILOT_SERVICE_WORKER=upstream` 可退回原样。
+    """
+    if os.environ.get("MOVPILOT_SERVICE_WORKER", "stub").lower() == "upstream":
+        return None
+    if not SERVICE_WORKER_STUB.is_file():
+        return None
+    return Response(
+        SERVICE_WORKER_STUB.read_bytes(),
+        media_type="text/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+async def _service_worker_request(request: Request) -> Response:
+    response = service_worker_response()
+    if response is None:
+        raise StarletteHTTPException(status_code=404)
+    return response
+
+
 def create_app(*, web_root: Path, proxy: BackendProxy) -> Starlette:
     routes = [Mount(path, app=ProxyEndpoint(proxy)) for path in PROXY_MOUNTS]
+    if service_worker_response() is not None:
+        # 路由排在静态挂载之前：这个路径由托管层接管，不再回落到前端自带的那份。
+        routes.append(Route(SERVICE_WORKER_PATH, endpoint=_service_worker_request))
     routes.append(Mount("/", app=SpaStaticFiles(directory=web_root)))
     return Starlette(routes=routes)
 

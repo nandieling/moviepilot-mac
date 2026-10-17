@@ -103,6 +103,14 @@ MoviePilot.app/Contents/Resources/
 「已初始化」，首次设置页直接跳过；`version.txt` 被缓存则是「缓存版本不一致」弹窗的老病根。
 宿主还记录界面载入时刻，后端本轮启动时刻晚于它就重新载入，页面不会停在旧实例的状态上。
 
+仅靠响应头还不够。上游前端自带 workbox Service Worker，它用 `CacheStorage.put` 把同源
+GET 响应直接写盘，而 `Cache-Control: no-store` 拦不住这个写入 —— 注册完超级用户再启动，
+读到的还是上一次的 `initialized: false`，于是又回到首次设置页。所以 mpweb 用
+`mpweb/sw-stub.js` 顶掉上游的 `service-worker.js`：照常注册，激活时清空历史缓存，之后
+不再缓存任何东西。设 `MOVPILOT_SERVICE_WORKER=upstream` 可退回上游原版。
+
+旧缓存是注册前那一次留下的，清一次就干净：菜单 显示 ▸ 清空界面缓存并重载（⌥⌘R）。
+
 ## 已知缺口
 
 - 签名目前只有 ad-hoc：换 Developer ID 证书 + 公证只需给 `build_app.py --identity`，

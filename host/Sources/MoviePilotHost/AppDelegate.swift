@@ -162,6 +162,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         reloadItem.target = self
         let homeItem = view.addItem(withTitle: "回到入口", action: #selector(openInterface), keyEquivalent: "H")
         homeItem.target = self
+        let purgeItem = view.addItem(withTitle: "清空界面缓存并重载",
+                                     action: #selector(purgeCacheAndReload),
+                                     keyEquivalent: "r")
+        purgeItem.keyEquivalentModifierMask = [.command, .option]
+        purgeItem.target = self
         view.addItem(.separator())
         view.addItem(withTitle: "进入全屏幕",
                      action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
@@ -247,6 +252,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     @objc private func reload() { webView?.reload() }
 
     @objc private func openInterface() { loadInterface() }
+
+    /// 界面缓存留下过期状态时的兜底入口：先把 CacheStorage 清干净再整页重载。
+    @objc private func purgeCacheAndReload() {
+        let script = "window.caches ? caches.keys().then(function (names) {"
+            + "return Promise.all(names.map(function (name) { return caches.delete(name) }))"
+            + "}) : null"
+        webView?.evaluateJavaScript(script, completionHandler: nil)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.loadInterface() }
+    }
 
     @objc private func toggleService() {
         guard let supervisor else { return }
