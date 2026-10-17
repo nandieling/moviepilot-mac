@@ -48,11 +48,16 @@ python3 packaging/build_app.py --tag v3.1.6 --backend-repo .cache/upstream --dmg
    `version.txt` 与后端声明不一致直接失败 —— 前后端版本不成对正是「缓存版本不一致」弹窗的根源。
 3. `build_runtime.py` 按 `runtime-manifest.json` 钉住的 python-build-standalone 独立解释器解包，
    用 `uv` 按上游 `uv.lock` 装依赖，再编译中文检索扩展（用户机器上不再需要 C 编译器）；
-   `make_icon.py` 用前端产物里的 1024 母版做圆角遮罩，生成 `AppIcon.icns`。
+   `make_icon.py` 用前端产物里的 1024 母版做圆角遮罩，现场生成 `AppIcon.icns`（生成物，仓库不存）。
 4. `fetch_resources.py` 同步 `sites` 原生扩展与站点数据包，这两个文件不在后端 git 里。
 
 装完用包内解释器跑一遍 `import app.main` 验收，预编译字节码，逐个签名内嵌二进制，
 最后 `hdiutil` 出可拖拽 dmg。溯源信息落在 `Resources/build-info.json`。
+
+仓库只存源码与脚本：`dist/`、`.cache/`、`host/.build/` 这三块产物（合计约 1.65 GB）以及
+`__pycache__`、`.DS_Store` 全在 `.gitignore` 里；数据目录万一被 `CONFIG_DIR` 指进仓库，
+`app.env`（含 API_TOKEN、GITHUB_TOKEN、CookieCloud 口令）、`user.db`、`plugin_packages/`
+也有兜底规则挡着。备份脚本默认写到 `~/Documents`，别改到仓库里。
 
 arm64 产物：`MoviePilot.app` 732 MB，`MoviePilot-v3.1.6-arm64.dmg` 455 MB（内嵌运行时 605 MB、
 前端 53 MB、后端 36 MB）。

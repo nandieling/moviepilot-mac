@@ -5,3 +5,28 @@ host/.build/
 dist/
 .cache/
 packaging/cache/
+
+# 构建与编辑器产物
+.build/
+.swiftpm/
+*.dSYM/
+*.xcresult/
+xcuserdata/
+.idea/
+.vscode/
+*.log
+.env
+
+# 图标由 make_icon.py 从前端 1024 母版现做，不存生成物
+packaging/AppIcon.icns
+
+# 有人把 CONFIG_DIR 指进仓库跑测试时，这些属于运行数据而不是源码
+/app.env
+/user.db
+/user.db-wal
+/user.db-shm
+/plugin_packages/
+/logs/
+/temp/
+*.tar.gz
+*.tar.gz.sha256

@@ -73,6 +73,16 @@ def write_info_plist(contents: Path, short_version: str, build_version: str, app
     plistlib.loads(payload.encode())  # 立刻验证 plist 合法
 
 
+def ensure_icon(resources: Path, *masters: Path) -> bool:
+    """图标跟着上游前端走：任一母版在就现做，仓库里不存这个生成物。"""
+    for master in masters:
+        if master.is_file():
+            run(sys.executable, PACKAGING / "make_icon.py", "--source", master,
+                "--out", resources / "AppIcon.icns")
+            return True
+    return (resources / "AppIcon.icns").is_file()
+
+
 def assemble(out: Path, short_version: str, build_version: str, appcast_url: str) -> Path:
     binary = build_host()
     app = out / "MoviePilot.app"
@@ -126,6 +136,10 @@ def build_dev(dev_root: Path, out: Path, appcast_url: str) -> Path:
     app = assemble(out, version["APP_VERSION"], version["APP_VERSION"], appcast_url)
     (app / "Contents" / "Resources" / "dev-runtime.json").write_text(
         json.dumps({"backendRoot": str(dev_root)}, indent=2) + "\n", encoding="utf-8")
+    if not ensure_icon(app / "Contents" / "Resources",
+                       dev_root / "public" / "pwa-1024x1024.png",
+                       dev_root / "frontend-dist" / "pwa-1024x1024.png"):
+        rl.log("  开发包没找到 1024 母版，本轮沿用默认图标")
     sign(app, "-")
     rl.log(f"开发包已生成：{app}")
     return app
@@ -201,12 +215,8 @@ def build_release(args, out: Path) -> Path:
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         # 图标跟着上游前端走，上游换了 logo 下一次组包就同步
-        master = resources / "web" / "pwa-1024x1024.png"
-        if master.is_file():
-            run(sys.executable, PACKAGING / "make_icon.py", "--source", master,
-                "--out", resources / "AppIcon.icns")
-        elif not (resources / "AppIcon.icns").is_file():
-            raise SystemExit("既没有前端母版也没有 packaging/AppIcon.icns，应用会没有图标")
+        if not ensure_icon(resources, resources / "web" / "pwa-1024x1024.png"):
+            raise SystemExit("前端产物里没有 1024 母版，应用会没有图标")
 
         rl.log("预编译字节码")
         run(resources / "runtime" / "bin" / "python3", "-m", "compileall", "-q",
@@ -233,6 +243,7 @@ def main() -> int:
     parser.add_argument("--build-version", help="CFBundleVersion，默认与后端版本一致")
     parser.add_argument("--out", type=Path, default=ROOT / "dist", help="输出目录")
     parser.add_argument("--cache-dir", type=Path, default=rl.DEFAULT_CACHE)
+    # 占位地址：更新通道接上之前别当真，写进 Info.plist 只是把入口留好。
     parser.add_argument("--appcast-url", default="https://moviepilot.org/appcast/stable.xml")
     parser.add_argument("--identity", default="-", help="codesign 身份，默认 ad-hoc")
     parser.add_argument("--dmg", action="store_true", help="顺手产出可拖拽安装的 dmg")
