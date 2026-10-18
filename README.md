@@ -35,8 +35,14 @@ CLI 版仓库不在（本机就已卸载）时，`lifecycle_check.sh` 自动改�
 ## 发布组包
 
 ```
+# 缓存只需要一次，之后每个新版本只补一个 tag
 git clone --depth 1 --branch v3.1.6 https://github.com/jxxghp/MoviePilot .cache/upstream
-python3 packaging/build_app.py --tag v3.1.6 --backend-repo .cache/upstream --dmg --delta
+git -C .cache/upstream fetch --depth 1 origin tag v3.1.7
+python3 packaging/build_app.py --tag v3.1.7 --backend-repo .cache/upstream --dmg --delta
+```
+
+前后端版本都取自上游 `version.py`，壳层不另存一份版本号：`--tag v3.1.7` 会让
+`Info.plist` 的 `CFBundleShortVersionString`、`build-info.json` 和产物文件名一起变成 3.1.7。
 ```
 
 取源码用的仓库由 `--backend-repo` 指定，自己留一份缓存即可，不依赖机器上有没有装 CLI 版。
@@ -59,7 +65,7 @@ python3 packaging/build_app.py --tag v3.1.6 --backend-repo .cache/upstream --dmg
 `app.env`（含 API_TOKEN、GITHUB_TOKEN、CookieCloud 口令）、`user.db`、`plugin_packages/`
 也有兜底规则挡着。备份脚本默认写到 `~/Documents`，别改到仓库里。
 
-arm64 产物：`MoviePilot.app` 732 MB，`MoviePilot-v3.1.6-arm64.dmg` 455 MB（内嵌运行时 605 MB、
+arm64 产物：`MoviePilot.app` 737 MB，`MoviePilot-v3.1.7-arm64.dmg` 464 MB（内嵌运行时 605 MB、
 前端 53 MB、后端 36 MB）。
 
 ## 包内布局
@@ -158,8 +164,12 @@ GET 响应直接写盘，而 `Cache-Control: no-store` 拦不住这个写入 —
 包内 `uv.lock` 摘要与装好的运行时对不上时更新器直接拒绝：那不是换源码能解决的事，
 硬换上去只会起不来，这种版本得装完整安装包。`--ignore-lock-change` 留给排查用。
 
+跟版就是组包命令换个 tag。上游是否带依赖变动由锁文件说了算：v3.1.6 → v3.1.7 就多了解析用的
+类型存根包（依赖数 196 → 201），这种版本走不了增分包，只能换整包；换上之后包内
+`build-info.json` 的锁摘要跟着变，后续那些运行时没动的版本就能吃 56 MB 的增分包。
+
 自己发增量更新不必带上 605 MB 运行时：`packaging/build_delta.py` 从组装好的包里切出
-`MoviePilot-<版本>-<架构>-appweb.zip`，v3.1.6 实测 55 MB（整包 dmg 459 MB），
+`MoviePilot-<版本>-<架构>-appweb.zip`，v3.1.7 实测 56 MB（整包 dmg 464 MB），
 由 `mpweb.updater apply-zip --zip <该包>` 消费。分发通道还没接，目前只能本地验一遍。
 
 ## 已知缺口
