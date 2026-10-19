@@ -1,19 +1,33 @@
 name: macOS 应用构建
 
+# 每天看一次上游有没有发新版：有就组包、自检、发 GitHub Release；没有就地收工。
+# 也可以手动跑，指定上游 tag 或只组包不发布。
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 上游后端 tag（留空则取最新）
+        description: 上游后端 tag（留空则取最新发布版）
         required: false
         default: ""
+      publish:
+        description: 产物去向
+        type: choice
+        options:
+          - 发布到 Releases
+          - 只留构建产物
+        default: 发布到 Releases
   schedule:
-    - cron: "20 1 * * *"   # 每天看一次上游有没有新 tag，有就重新组包
+    - cron: "20 1 * * *"   # UTC 01:20，北京时间 09:20
 
 env:
   UPSTREAM: jxxghp/MoviePilot
 
+concurrency:
+  group: macos-app
+  cancel-in-progress: false
+
 jobs:
+  # 先看该不该跑：macOS 构建分钟按 10 倍计，别拿它做无谓的空转
   decide:
     runs-on: ubuntu-latest
     outputs:
@@ -23,14 +37,16 @@ jobs:
       - id: pick
         env:
           GH_TOKEN: ${{ github.token }}
+          WANT: ${{ inputs.tag }}
         run: |
           latest=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
-          wanted="${{ inputs.tag }}"
-          [ -z "$wanted" ] && wanted="$latest"
+          wanted="${WANT:-$latest}"
           shipped=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || echo "")
+          echo "上游最新 $latest，本次目标 $wanted，本仓库已发布 ${shipped:-无}"
           echo "tag=$wanted" >> "$GITHUB_OUTPUT"
-          if [ -z "${{ inputs.tag }}" ] && [ "$wanted" = "$shipped" ]; then
-            echo "上游 $wanted 已发布过，跳过"; echo "skip=true" >> "$GITHUB_OUTPUT"
+          if [ -z "$WANT" ] && [ "$wanted" = "$shipped" ]; then
+            echo "上游 $wanted 已经发过，跳过"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -38,10 +54,28 @@ jobs:
   build:
     needs: decide
     if: needs.decide.outputs.skip != 'true'
-    runs-on: macos-14
+    runs-on: macos-15        # Swift 6 工具链要 Xcode 16，运行时按 arm64 组装
+    timeout-minutes: 45
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # 解释器 30 MB、前端产物 50 MB、站点资源 2 MB：都带 sha256，缓存命中就直接复用
+      - name: 缓存组包下载件
+        uses: actions/cache@v4
+        with:
+          path: .cache
+          key: mp-cache-${{ runner.arch }}-${{ hashFiles('packaging/runtime-manifest.json') }}
+          restore-keys: mp-cache-${{ runner.arch }}-
 
       - name: 取上游 tag
         run: git clone --depth 1 --branch "${{ needs.decide.outputs.tag }}" "https://github.com/$UPSTREAM.git" upstream
@@ -50,14 +84,56 @@ jobs:
         run: python3 -m unittest discover -s tests -p "test_*.py"
 
       - name: 组包
-        run: python3 packaging/build_app.py --tag "${{ needs.decide.outputs.tag }}" --backend-repo upstream --dmg
+        run: python3 packaging/build_app.py --tag "${{ needs.decide.outputs.tag }}" --backend-repo upstream --dmg --delta
 
       - name: 启动自检
-        # 跑包内没有 CLI 版仓库，脚本自动改测整包产物：就绪耗时、接口冒烟、
-        # 插件目录重定位、TERM/KILL 后不留残留监听。
+        # 没有 CLI 版仓库，脚本自动改测整包产物：就绪耗时、接口冒烟、
+        # 插件目录重定位、TERM/KILL 后不留残留监听。宿主以 --headless 直跑，不需要窗口会话。
         run: packaging/lifecycle_check.sh
+
+      - name: 整理产物
+        run: |
+          cp dist/MoviePilot.app/Contents/Resources/build-info.json dist/build-info.json
+          for f in dist/*.dmg dist/*-appweb.zip; do
+            [ -f "$f.sha256" ] || (cd dist && shasum -a 256 "$(basename "$f")" > "$(basename "$f").sha256")
+          done
+          ls -la dist/*.dmg dist/*-appweb.zip dist/*.sha256
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MoviePilot-${{ needs.decide.outputs.tag }}
-          path: dist/*.dmg
+          name: MoviePilot-${{ needs.decide.outputs.tag }}-arm64
+          path: |
+            dist/*.dmg
+            dist/*-appweb.zip
+            dist/*.sha256
+            dist/build-info.json
+          if-no-files-found: error
+
+      - name: 发布
+        if: inputs.publish != '只留构建产物'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.decide.outputs.tag }}
+        run: |
+          commit=$(python3 -c "import json;print(json.load(open('dist/build-info.json'))['backend']['commit'][:10])")
+          deps=$(python3 -c "import json;print(json.load(open('dist/build-info.json'))['runtime']['deps_count'])")
+          cat > notes.md <<EOF
+          上游 MoviePilot \`$TAG\`（\`$commit\`）的 macOS 应用版，Apple 芯片，内嵌运行时（$deps 个依赖），免命令行安装。
+
+          | 文件 | 用途 |
+          |---|---|
+          | \`MoviePilot-$TAG-arm64.dmg\` | 完整安装包：首次安装，或这版依赖锁有变动时用 |
+          | \`MoviePilot-$TAG-arm64-appweb.zip\` | 前后端增分包：运行时没动的版本换这一份就够 |
+          | \`.sha256\` | 上面两份的校验值 |
+
+          当前是 ad-hoc 签名、未公证：第一次打开被 Gatekeeper 拦住时，在访达里右键应用选「打开」。
+          EOF
+          files=(dist/*.dmg dist/*-appweb.zip dist/*.sha256)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --clobber
+            gh release edit "$TAG" --title "MoviePilot $TAG" --notes-file notes.md --latest
+          else
+            gh release create "$TAG" "${files[@]}" --target "$GITHUB_SHA" \
+              --title "MoviePilot $TAG" --notes-file notes.md --latest
+          fi
+          gh release view "$TAG" --json tagName,assets --jq '[.tagName, (.assets | map(.name))] | @json'

@@ -68,6 +68,17 @@ python3 packaging/build_app.py --tag v3.1.7 --backend-repo .cache/upstream --dmg
 arm64 产物：`MoviePilot.app` 737 MB，`MoviePilot-v3.1.7-arm64.dmg` 464 MB（内嵌运行时 605 MB、
 前端 53 MB、后端 36 MB）。
 
+### 自动组包
+
+`.github/workflows/macos-app.yml` 每天北京时间 09:20 看一眼上游发没发新版，和本仓库最新发布
+比对：没有新版就地收工，有就在 `macos-15` runner 上跑同一套流程 —— 托管层单测、组包
+（dmg + 增分包）、`lifecycle_check.sh` 整包自检，然后把 dmg、增分包、校验值发成一个
+GitHub Release，Actions 构建页另留一份产物快照。手动触发可以指定上游 tag，也可以只组包不发布。
+
+解释器、前端产物、站点资源（合计约 110 MB，都带 sha256）用 `actions/cache` 存在 `.cache`，
+键取 `runtime-manifest.json` 的摘要；Python 轮子交给 setup-uv 的缓存。macOS 构建分钟按 10 倍计费，
+所以「上游没动就不跑」这件事放在了 ubuntu 上的 decide 作业里做。
+
 ## 包内布局
 
 ```
@@ -176,7 +187,8 @@ GET 响应直接写盘，而 `Cache-Control: no-store` 拦不住这个写入 —
 
 - 签名目前只有 ad-hoc：换 Developer ID 证书 + 公证只需给 `build_app.py --identity`，
   但内嵌 572 个二进制的逐层签名要在真证书下再验一遍。
-- 更新缺的是分发通道：落地与重启已经接上，appcast 地址还是占位值，增分包暂时没有地方发。
+- 分发通道是有了（CI 发的 GitHub Release），应用内还不会自己去取：`--appcast-url` 仍是占位值，
+  增分包目前得手动换。
 - 首屏之后的首次设置页直接用上游前端自带的 `/initialize`，无需自建向导。
 - 内嵌运行时占了 605 MB，其中 langchain/boto3 等可选 SDK 可以按插件需要再裁一轮。
-- `build_runtime.py` 每次组包都重新解包解释器，CI 上可加 `--reuse-runtime` 跳过。
+- `build_runtime.py` 每次组包都重新解包解释器：CI 靠 `.cache` 免掉了下载，解包那几十秒还没省。
