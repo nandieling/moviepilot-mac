@@ -81,7 +81,14 @@ jobs:
         run: git clone --depth 1 --branch "${{ needs.decide.outputs.tag }}" "https://github.com/$UPSTREAM.git" upstream
 
       - name: 托管层单测
-        run: python3 -m unittest discover -s tests -p "test_*.py"
+        # runner 那个 python 什么都不带：按上游锁文件给托管层单测搭个几百 KB 的小环境，
+        # 版本跟随包发出去那份一致，间接依赖交给 uv。
+        run: |
+          python3 packaging/mpweb_test_deps.py upstream/uv.lock > "$RUNNER_TEMP/mpweb-deps.txt"
+          uv venv --quiet "$RUNNER_TEMP/mpweb-venv"
+          uv pip install --quiet --python "$RUNNER_TEMP/mpweb-venv/bin/python" \
+            -r "$RUNNER_TEMP/mpweb-deps.txt"
+          "$RUNNER_TEMP/mpweb-venv/bin/python" -m unittest discover -s tests -p "test_*.py"
 
       - name: 组包
         run: >
