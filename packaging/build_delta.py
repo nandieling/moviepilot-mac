@@ -21,6 +21,8 @@ import release_lib as rl
 
 CONTENTS = ("Contents", "Resources")
 PAYLOADS = {"app": "app", "web": "web"}
+# 应用内发布通道按这个后缀在 Release 里找包，改这里要同步 mpweb.release
+ARCHIVE_SUFFIX = "-appweb.zip"
 
 
 def _iter_files(root: Path, prefix: str) -> Iterator[tuple[Path, str]]:
@@ -65,7 +67,7 @@ def build_delta(app: Path, out: Path) -> Path:
     cpu = str(info.get("cpu") or rl.host_cpu())
 
     out.mkdir(parents=True, exist_ok=True)
-    archive = out / f"MoviePilot-{version}-{cpu}-appweb.zip"
+    archive = out / f"MoviePilot-{version}-{cpu}{ARCHIVE_SUFFIX}"
     with zipfile.ZipFile(archive, "w", compresslevel=9) as bundle:
         manifest = dict(info)
         manifest["kind"] = "appweb"

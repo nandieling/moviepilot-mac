@@ -65,7 +65,7 @@ python3 packaging/build_app.py --tag v3.1.7 --backend-repo .cache/upstream --dmg
 `app.env`（含 API_TOKEN、GITHUB_TOKEN、CookieCloud 口令）、`user.db`、`plugin_packages/`
 也有兜底规则挡着。备份脚本默认写到 `~/Documents`，别改到仓库里。
 
-arm64 产物：`MoviePilot.app` 737 MB，`MoviePilot-v3.1.7-arm64.dmg` 464 MB（内嵌运行时 605 MB、
+arm64 产物：`MoviePilot.app` 737 MB，`MoviePilot-v3.1.7-arm64.dmg` 453 MB（内嵌运行时 605 MB、
 前端 53 MB、后端 36 MB）。
 
 ### 自动组包
@@ -74,6 +74,8 @@ arm64 产物：`MoviePilot.app` 737 MB，`MoviePilot-v3.1.7-arm64.dmg` 464 MB（
 比对：没有新版就地收工，有就在 `macos-15` runner 上跑同一套流程 —— 托管层单测、组包
 （dmg + 增分包）、`lifecycle_check.sh` 整包自检，然后把 dmg、增分包、校验值发成一个
 GitHub Release，Actions 构建页另留一份产物快照。手动触发可以指定上游 tag，也可以只组包不发布。
+组包时把 `$GITHUB_REPOSITORY` 写进 `build-info.json` 的 `channel`，装好的应用据此认领自己的
+发布通道，本仓库以外的构建用 `--release-repo` 指别处、`--no-channel` 关掉。
 
 解释器、前端产物、站点资源（合计约 110 MB，都带 sha256）用 `actions/cache` 存在 `.cache`，
 键取 `runtime-manifest.json` 的摘要；Python 轮子交给 setup-uv 的缓存。macOS 构建分钟按 10 倍计费，
@@ -180,15 +182,31 @@ GET 响应直接写盘，而 `Cache-Control: no-store` 拦不住这个写入 —
 `build-info.json` 的锁摘要跟着变，后续那些运行时没动的版本就能吃 56 MB 的增分包。
 
 自己发增量更新不必带上 605 MB 运行时：`packaging/build_delta.py` 从组装好的包里切出
-`MoviePilot-<版本>-<架构>-appweb.zip`，v3.1.7 实测 56 MB（整包 dmg 464 MB），
-由 `mpweb.updater apply-zip --zip <该包>` 消费。分发通道还没接，目前只能本地验一遍。
+`MoviePilot-<版本>-<架构>-appweb.zip`，v3.1.7 实测 56 MB（整包 dmg 453 MB），
+由 `mpweb.updater apply-zip --zip <该包>` 消费。
+
+### 应用内检查更新
+
+取件那一步交给 `mpweb/release.py`：读本包 `build-info.json` 的 `channel.repo`，问
+`api.github.com` 要最新发布，按数字段比版本，命中就下 `-appweb.zip` 和它的 `.sha256`，
+校验通过才存进数据目录 `temp/mpweb/updates/`（只留最近 3 个），然后投一份
+`{"action":"update","zip":…}` 给宿主 —— 剩下的路和其它更新一样，`UpdateCoordinator`
+取件、拉起 `mpweb.updater apply-zip`、换包、重新签名、把应用叫回来。
+
+传输走系统 `curl`：包内那个解释器不带根证书，换台机器 urllib 就验不过。
+限流挡路时可以用上游配置页里那个 `GITHUB_TOKEN`（存在 `app.env`，值仍是默认占位
+`moviepilot` 时按未配置处理）。退出码是有含义的：0 已投递、10 已最新、20 没有通道、1 出错。
+
+界面入口是菜单栏图标里的「检查更新」，启动 90 秒后自动查一次、之后每 12 小时一次，
+`MOVPILOT_UPDATE_CHECK=0` 关掉后台检查（菜单项仍可手动查）。开发态包没有通道，菜单项直接隐藏。
 
 ## 已知缺口
 
 - 签名目前只有 ad-hoc：换 Developer ID 证书 + 公证只需给 `build_app.py --identity`，
   但内嵌 572 个二进制的逐层签名要在真证书下再验一遍。
-- 分发通道是有了（CI 发的 GitHub Release），应用内还不会自己去取：`--appcast-url` 仍是占位值，
-  增分包目前得手动换。
+- 增分包只带 `Resources/app` 与 `Resources/web`：托管层、Swift 壳层、内嵌运行时的改动都得换
+  整包，而这些恰好也住在增分包能碰到的目录之外。CI 的 Release 同时发 dmg，应用检测到这类
+  版本（锁摘要对不上）时会拒绝就地更新，提醒装完整安装包。
 - 首屏之后的首次设置页直接用上游前端自带的 `/initialize`，无需自建向导。
 - 内嵌运行时占了 605 MB，其中 langchain/boto3 等可选 SDK 可以按插件需要再裁一轮。
 - `build_runtime.py` 每次组包都重新解包解释器：CI 靠 `.cache` 免掉了下载，解包那几十秒还没省。

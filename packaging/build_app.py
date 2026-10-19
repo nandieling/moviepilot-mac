@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import plistlib
 import shutil
 import subprocess
@@ -38,6 +39,14 @@ def git(repo: Path, *args: str) -> str:
     result = subprocess.run(["git", "-C", str(repo), *args], check=True,
                             capture_output=True, text=True)
     return result.stdout.strip()
+
+
+def detect_release_repo() -> str:
+    """从 origin 猜出发布仓库（owner/name），本机和 CI 组包都不用显式传参。"""
+    process = subprocess.run(["git", "-C", str(ROOT), "remote", "get-url", "origin"],
+                             capture_output=True, text=True)
+    match = re.search(r"[:/]([^/]+/[^/]+?)(?:\.git)?/?$", process.stdout.strip())
+    return match.group(1) if process.returncode == 0 and match else ""
 
 
 def build_host() -> Path:
@@ -205,11 +214,15 @@ def build_release(args, out: Path) -> Path:
                                 "PYTHONPATH": str(resources / "pythonhost")})
 
         runtime_info = json.loads((resources / "runtime" / "runtime-info.json").read_text(encoding="utf-8"))
+        # 发布通道：应用内「检查更新」靠它知道去哪取增分包，没写就只报「没有通道」
+        channel = {"repo": "" if args.no_channel else (args.release_repo or detect_release_repo()),
+                   "asset_suffix": build_delta.ARCHIVE_SUFFIX}
         (resources / "build-info.json").write_text(json.dumps({
             "backend": {"tag": args.tag, "commit": commit},
             "frontend": json.loads((resources / "web" / ".provenance.json").read_text(encoding="utf-8")),
             "runtime": runtime_info,
             "resources": json.loads((resources / "app" / ".resources.json").read_text(encoding="utf-8")),
+            "channel": channel,
             "cpu": rl.host_cpu(),
             "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -243,8 +256,12 @@ def main() -> int:
     parser.add_argument("--build-version", help="CFBundleVersion，默认与后端版本一致")
     parser.add_argument("--out", type=Path, default=ROOT / "dist", help="输出目录")
     parser.add_argument("--cache-dir", type=Path, default=rl.DEFAULT_CACHE)
-    # 占位地址：更新通道接上之前别当真，写进 Info.plist 只是把入口留好。
+    # 占位地址：真正在用的是 build-info.json 里的 channel，这里只是给 Sparkle 那类工具留个入口。
     parser.add_argument("--appcast-url", default="https://moviepilot.org/appcast/stable.xml")
+    parser.add_argument("--release-repo", default="",
+                       help="发布增分包的 GitHub 仓库 owner/name，默认取 origin")
+    parser.add_argument("--no-channel", action="store_true",
+                       help="不写发布通道，应用内不再自动检查更新")
     parser.add_argument("--identity", default="-", help="codesign 身份，默认 ad-hoc")
     parser.add_argument("--dmg", action="store_true", help="顺手产出可拖拽安装的 dmg")
     parser.add_argument("--delta", action="store_true", help="顺手产出前后端增分包")

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var statusItem: NSStatusItem!
     private var startButton: NSMenuItem!
     private var rememberPasswordItem: NSMenuItem?
+    private var updateItem: NSMenuItem?
     private let statusLabel = NSTextField(labelWithString: "正在启动…")
     private var loadDeadline = Date.distantPast
     /// 界面端口探测的轮次号：过期回调直接丢弃，免得几轮探测互相踩。
@@ -258,6 +259,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         let restartService = menu.addItem(withTitle: "重启后台服务", action: #selector(restartService), keyEquivalent: "")
         restartService.target = self
         restartService.isHidden = supervisor == nil
+        // 增分包发在本仓库的 Release 上；自动巡检之外再留一个立刻查的口子
+        updateItem = menu.addItem(withTitle: "检查更新", action: #selector(checkForUpdatesNow), keyEquivalent: "")
+        updateItem?.target = self
+        updateItem?.isHidden = coordinator == nil
         rememberPasswordItem = menu.addItem(withTitle: "记住登录密码", action: #selector(toggleRememberPassword), keyEquivalent: "")
         rememberPasswordItem?.target = self
         rememberPasswordItem?.state = remembersPassword ? .on : .off
@@ -323,6 +328,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     @objc private func reload() { webView?.reload() }
 
     @objc private func restartService() { supervisor?.restart() }
+
+    @objc private func checkForUpdatesNow() {
+        guard let coordinator else { return }
+        statusLabel.stringValue = "正在检查更新…"
+        updateItem?.isEnabled = false
+        coordinator.checkForUpdates { [weak self] outcome in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.updateItem?.isEnabled = true
+                self.statusLabel.stringValue = outcome.menuText
+                // 菜单项上留一会儿结果再改回原名；真要装更新的话应用马上就退出了
+                self.updateItem?.title = outcome.menuText
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+                    self?.updateItem?.title = "检查更新"
+                }
+            }
+        }
+    }
 
     @objc private func openInterface() { loadInterface() }
 

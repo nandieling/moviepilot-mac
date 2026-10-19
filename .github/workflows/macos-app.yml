@@ -84,7 +84,9 @@ jobs:
         run: python3 -m unittest discover -s tests -p "test_*.py"
 
       - name: 组包
-        run: python3 packaging/build_app.py --tag "${{ needs.decide.outputs.tag }}" --backend-repo upstream --dmg --delta
+        run: >
+          python3 packaging/build_app.py --tag "${{ needs.decide.outputs.tag }}"
+          --backend-repo upstream --release-repo "$GITHUB_REPOSITORY" --dmg --delta
 
       - name: 启动自检
         # 没有 CLI 版仓库，脚本自动改测整包产物：就绪耗时、接口冒烟、
