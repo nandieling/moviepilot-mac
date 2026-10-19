@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var startButton: NSMenuItem!
     private var rememberPasswordItem: NSMenuItem?
     private var updateItem: NSMenuItem?
+    private var autoCheckItem: NSMenuItem?
     private let statusLabel = NSTextField(labelWithString: "正在启动…")
     private var loadDeadline = Date.distantPast
     /// 界面端口探测的轮次号：过期回调直接丢弃，免得几轮探测互相踩。
@@ -263,6 +264,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         updateItem = menu.addItem(withTitle: "检查更新", action: #selector(checkForUpdatesNow), keyEquivalent: "")
         updateItem?.target = self
         updateItem?.isHidden = coordinator == nil
+        autoCheckItem = menu.addItem(withTitle: "自动检查更新", action: #selector(toggleAutoCheck), keyEquivalent: "")
+        autoCheckItem?.target = self
+        autoCheckItem?.state = (coordinator?.autoCheck ?? false) ? .on : .off
+        autoCheckItem?.isHidden = !(coordinator?.canToggleAutoCheck ?? false)
         rememberPasswordItem = menu.addItem(withTitle: "记住登录密码", action: #selector(toggleRememberPassword), keyEquivalent: "")
         rememberPasswordItem?.target = self
         rememberPasswordItem?.state = remembersPassword ? .on : .off
@@ -348,6 +353,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     @objc private func openInterface() { loadInterface() }
+
+    /// 不想让应用碰 GitHub 的话，这里关掉就行；手动检查仍然可用。
+    @objc private func toggleAutoCheck() {
+        guard let coordinator else { return }
+        let on = !coordinator.autoCheck
+        coordinator.setAutoCheck(on)
+        autoCheckItem?.state = on ? .on : .off
+        statusLabel.stringValue = on ? "已开启自动检查更新" : "已关闭自动检查更新"
+    }
 
     /// 界面缓存留下过期状态时的兜底入口：先把 CacheStorage 清干净再整页重载。
     @objc private func purgeCacheAndReload() {

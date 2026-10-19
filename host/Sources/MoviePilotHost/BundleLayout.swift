@@ -59,6 +59,8 @@ struct BundleLayout {
     var pluginMirror: URL { configDir.appendingPathComponent("plugin_packages") }
     /// 托管层投递动作请求的位置：界面里的重启、安装更新都从这里过。
     var hostRequestFile: URL { configDir.appendingPathComponent("temp/mpweb/host-request.json") }
+    /// 宿主自己的开关：存数据目录，不塞进上游那份 app.env（配置页保存会整份重写它）。
+    var prefsFile: URL { configDir.appendingPathComponent("host-prefs.json") }
     /// 更新流水账。
     var updateLog: URL { logDir.appendingPathComponent("update.log") }
     /// 出厂那份插件包标记的副本：数据目录被清空时靠它把 `app.plugins` 重新撑起来。

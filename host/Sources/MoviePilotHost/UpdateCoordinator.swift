@@ -40,15 +40,24 @@ final class UpdateCoordinator {
     private var timer: DispatchSourceTimer?
     private var checker: DispatchSourceTimer?
     private var installing = false
-    /// 组包时没写发布通道（或用户用环境变量关掉），就不再打网络
-    private let checksEnabled: Bool
+    /// 包里写了发布通道、也没被环境变量禁掉，才允许打这个网络
+    private let channelAvailable: Bool
+    private var prefs: HostPrefs
+    /// 定时检查的节奏，start 时定下来，开关来回切也沿用同一份
+    private var checkSchedule: (first: TimeInterval, every: TimeInterval) = (90, 12 * 3600)
+
+    /// 界面上「自动检查更新」的开关状态。
+    var autoCheck: Bool { channelAvailable && prefs.autoUpdateCheck }
+    /// 环境变量硬关掉时，界面上那个开关也没意义了。
+    var canToggleAutoCheck: Bool { channelAvailable }
 
     init(layout: BundleLayout, supervisor: ServiceSupervisor, onQuit: @escaping () -> Void) {
         self.layout = layout
         self.supervisor = supervisor
         self.onQuit = onQuit
         let disabled = (ProcessInfo.processInfo.environment["MOVPILOT_UPDATE_CHECK"] ?? "").lowercased()
-        checksEnabled = layout.isPackaged && disabled != "0" && disabled != "false"
+        channelAvailable = layout.isPackaged && disabled != "0" && disabled != "false"
+        prefs = HostPrefs.load(layout)
     }
 
     func start(interval: TimeInterval = 2, firstCheck: TimeInterval = 90, checkInterval: TimeInterval = 12 * 3600) {
@@ -57,13 +66,49 @@ final class UpdateCoordinator {
         source.setEventHandler { [weak self] in self?.collect() }
         timer = source
         source.resume()
-        guard checksEnabled else { return }
-        // 启动后先等一会儿：服务正在装载插件，这时候抢带宽和 CPU 不划算
+        checkSchedule = (firstCheck, checkInterval)
+        scheduleChecker()
+    }
+
+    /// 按当前开关决定要不要定时查版本：启动后先等一会儿，
+    /// 那会儿服务正在装载插件，抢带宽和 CPU 不划算。
+    private func scheduleChecker() {
+        checker?.cancel()
+        checker = nil
+        guard autoCheck else { return }
         let poller = DispatchSource.makeTimerSource(queue: queue)
-        poller.schedule(deadline: .now() + firstCheck, repeating: checkInterval)
+        poller.schedule(deadline: .now() + checkSchedule.first, repeating: checkSchedule.every)
         poller.setEventHandler { [weak self] in self?.checkForUpdates { _ in } }
         checker = poller
         poller.resume()
+    }
+
+    /// 界面上「自动检查更新」：改完立刻生效，并落到数据目录里，下次启动还认。
+    func setAutoCheck(_ on: Bool) {
+        prefs.autoUpdateCheck = on
+        prefs.save(layout)
+        note(on ? "自动检查已开启" : "自动检查已关闭，只剩手动检查")
+        queue.async { self.scheduleChecker() }
+    }
+
+    private static let stamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    /// 开关动作也写进更新流水账：离线用时得能确认自己关掉了什么。
+    private func note(_ message: String) {
+        guard let data = "\(Self.stamp.string(from: Date())) 发布通道：\(message)\n".data(using: .utf8) else { return }
+        try? FileManager.default.createDirectory(at: layout.logDir, withIntermediateDirectories: true)
+        if let handle = try? FileHandle(forWritingTo: layout.updateLog) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            try? handle.close()
+        } else {
+            try? data.write(to: layout.updateLog)
+        }
     }
 
     func stop() {
@@ -127,7 +172,7 @@ final class UpdateCoordinator {
     /// 查一次发布通道：取到新包会写投递文件，两秒内这次安装就接上了。
     func checkForUpdates(_ completion: @escaping (CheckOutcome) -> Void) {
         guard !installing else { return }
-        guard checksEnabled else {
+        guard channelAvailable else {
             completion(.noChannel)
             return
         }

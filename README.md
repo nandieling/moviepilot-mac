@@ -97,6 +97,8 @@ MoviePilot.app/Contents/Resources/
 ```
 
 数据目录沿用 `~/Library/Application Support/MoviePilot`，CLI 版用户可直接继承已有 `user.db`、插件与 Cookie。
+宿主自己的开关另存一份 `host-prefs.json`，上游配置页保存时会整份重写 `app.env`，
+把我们的键塞进去迟早被抹掉。
 
 ## 插件目录
 
@@ -203,6 +205,11 @@ GET 响应直接写盘，而 `Cache-Control: no-store` 拦不住这个写入 —
 
 界面入口是菜单栏图标里的「检查更新」，启动 90 秒后自动查一次、之后每 12 小时一次，
 `MOVPILOT_UPDATE_CHECK=0` 关掉后台检查（菜单项仍可手动查）。开发态包没有通道，菜单项直接隐藏。
+
+完整安装包是自足的：`dist/MoviePilot-<版本>-<架构>.dmg` 拖进「应用程序」就能用，安装和运行
+都不要求访问 GitHub。想让应用连版本都不去查，菜单里取消「自动检查更新」即可，状态写进
+`host-prefs.json`，之后只有手动点「检查更新」才会打网络。上游后端自己那套联网功能（插件市场、
+站点资源、CookieCloud）不受这个开关管，也不属于打包这一层。
 
 ## 已知缺口
 
