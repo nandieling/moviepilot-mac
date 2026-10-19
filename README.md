@@ -77,6 +77,10 @@ GitHub Release，Actions 构建页另留一份产物快照。手动触发可以�
 组包时把 `$GITHUB_REPOSITORY` 写进 `build-info.json` 的 `channel`，装好的应用据此认领自己的
 发布通道，本仓库以外的构建用 `--release-repo` 指别处、`--no-channel` 关掉。
 
+单测那一步在临时 venv 里跑：`packaging/mpweb_test_deps.py` 从上游 `uv.lock` 挑出托管层真正用到
+的 httpx/starlette/uvicorn，按锁里的版本装 —— runner 那个 python 什么都不带，为几个测试也没
+必要拉起 201 个包。
+
 解释器、前端产物、站点资源（合计约 110 MB，都带 sha256）用 `actions/cache` 存在 `.cache`，
 键取 `runtime-manifest.json` 的摘要；Python 轮子交给 setup-uv 的缓存。macOS 构建分钟按 10 倍计费，
 所以「上游没动就不跑」这件事放在了 ubuntu 上的 decide 作业里做。
