@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 import sys
 import unittest
 import zipfile
@@ -30,6 +31,8 @@ def installed_bundle(root: Path, *, version: str = "v1.0.0") -> Path:
     backend = resources / "app"
     site = backend / "app" / "application" / "site"
     site.mkdir(parents=True)
+    with (app / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump({"CFBundleShortVersionString": version, "CFBundleVersion": version}, handle)
     (backend / "version.py").write_text(f"APP_VERSION = '{version}'\n", encoding="utf-8")
     (backend / "uv.lock").write_text(LOCK_A, encoding="utf-8")
     (site / "user.sites.v3.bin").write_bytes(SITE_BIN)
@@ -96,6 +99,15 @@ class ZipPayloadTest(unittest.TestCase):
         info = json.loads((resources / "build-info.json").read_text())
         self.assertEqual(info["backend"]["tag"], "v2.0.0")
         self.assertIn("updated_at", info)
+
+    def test_the_bundle_version_is_restamped(self):
+        """换完源码，Info.plist 也得跟着改，不然「关于」面板还停在旧版本号。"""
+        archive = self._zip(new_backend(self.base), new_web(self.base))
+        with payload_from_zip(archive) as payload:
+            apply_payload(self.app, payload, config_dir=self.config, resign=False)
+        info = plistlib.loads((self.app / "Contents" / "Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleShortVersionString"], "v2.0.0")
+        self.assertEqual(info["CFBundleVersion"], "v2.0.0")
 
     def test_site_runtime_resources_survive_the_swap(self) -> None:
         archive = self._zip(new_backend(self.base), new_web(self.base))

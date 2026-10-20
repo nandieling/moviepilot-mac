@@ -13,6 +13,7 @@ import contextlib
 import hashlib
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -310,6 +311,23 @@ def _sign_native(paths: list[Path]) -> None:
     )
 
 
+def _stamp_version(app: Path, version: str) -> None:
+    """把整包版本跟着改：Finder、「关于」面板和登录页底栏读的都是 Info.plist，
+    只更新 build-info.json 的话，升级完它仍停在装进来那一版。"""
+    plist = app / "Contents" / "Info.plist"
+    try:
+        data = plistlib.loads(plist.read_bytes())
+    except (OSError, ValueError):
+        return
+    changed = False
+    for key in ("CFBundleShortVersionString", "CFBundleVersion"):
+        if key in data and data[key] != version:
+            data[key] = version
+            changed = True
+    if changed:
+        plist.write_bytes(plistlib.dumps(data, sort_keys=False))
+
+
 def _reseal(app: Path) -> None:
     entitlements = app / "Contents" / "Resources" / "MoviePilot.entitlements"
     command = ["codesign", "--force", "--sign", _identity()]
@@ -391,6 +409,9 @@ def apply_payload(
         (resources / BUILD_INFO).write_text(
             json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
+        version = app_version(backend_root) if payload.backend is not None else None
+        if version:
+            _stamp_version(app, version)
         if resign:
             _reseal(app)
     finally:
