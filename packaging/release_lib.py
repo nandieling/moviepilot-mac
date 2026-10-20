@@ -34,6 +34,19 @@ def _curl(args: list[str]) -> None:
                     *args], check=True)
 
 
+def api_headers() -> list[str]:
+    """查 GitHub API 时尽量带上 token。
+
+    匿名请求按出口 IP 算 60 次/小时，CI runner 那份 IP 是成百上千个工作流共用的，
+    光靠运气迟早见底；带上下发的工作流令牌就是另一个量级了。
+    """
+    headers = ["Accept: application/vnd.github+json"]
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers.append(f"Authorization: Bearer {token}")
+    return headers
+
+
 def download(url: str, dest: Path, sha256: str | None = None, label: str = "") -> Path:
     """下载到缓存目录，已存在且校验通过就复用。"""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -56,9 +69,18 @@ def download(url: str, dest: Path, sha256: str | None = None, label: str = "") -
 def github_asset(repo: str, tag: str, asset: str) -> tuple[str, str]:
     """取发布产物的下载地址与 sha256（GitHub 直接给了 digest，不用再抓一遍算）。"""
     url = f"{API}/repos/{repo}/releases/tags/{tag}"
+    headers: list[str] = []
+    for header in api_headers():
+        headers += ["--header", header]
+    if "Authorization" in " ".join(headers):
+        log("  GitHub API：带令牌")
     with tempfile.NamedTemporaryFile("rb+", suffix=".json", delete=True) as handle:
-        _curl(["--silent", "--show-error", "--header", "Accept: application/vnd.github+json",
-               "--output", handle.name, url])
+        try:
+            _curl(["--silent", "--show-error", *headers, "--output", handle.name, url])
+        except subprocess.CalledProcessError as exc:
+            hint = "匿名请求按出口 IP 限 60 次/小时" if "Authorization" not in " ".join(headers) \
+                else "带令牌仍被拒，可能是权限不足或触到了二次限流"
+            raise SystemExit(f"查 {url} 失败（curl 退出码 {exc.returncode}）：{hint}") from exc
         payload = json.load(handle)
     for item in payload.get("assets", []):
         if item["name"] == asset:

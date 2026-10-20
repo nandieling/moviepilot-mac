@@ -91,6 +91,9 @@ jobs:
           "$RUNNER_TEMP/mpweb-venv/bin/python" -m unittest discover -s tests -p "test_*.py"
 
       - name: 组包
+        # 查前端产物走 GitHub API：runner 的出口 IP 大家共用，匿名 60 次/小时不够用
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: >
           python3 packaging/build_app.py --tag "${{ needs.decide.outputs.tag }}"
           --backend-repo upstream --release-repo "$GITHUB_REPOSITORY" --dmg --delta
