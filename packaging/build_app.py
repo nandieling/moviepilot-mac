@@ -16,6 +16,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+import time
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,8 +132,22 @@ def make_dmg(app: Path, out: Path) -> Path:
     shutil.copytree(app, staging / app.name, symlinks=True)
     os.symlink("/Applications", staging / "Applications")
     dmg = out / f"MoviePilot-{version['CFBundleShortVersionString']}-{rl.host_cpu()}.dmg"
-    run("hdiutil", "create", "-volname", "MoviePilot", "-srcfolder", staging, "-ov",
-        "-format", "UDZO", "-imagekey", "zlib-level=6", dmg)
+    cmd = ["hdiutil", "create", "-volname", "MoviePilot", "-srcfolder", staging, "-ov",
+           "-format", "UDZO", "-imagekey", "zlib-level=6", dmg]
+    # CI 上 diskimages-helper 偶尔还没松手，hdiutil 就以 "Resource busy" 收场，重跑就好。
+    # 每次重来前先把可能挂着的同名卷卸掉、删掉半成品，并把挂载情况留在日志里。
+    for attempt in range(1, 4):
+        rl.log(f"  $ hdiutil create … {dmg.name}（第 {attempt} 次）")
+        subprocess.run(["hdiutil", "detach", "/Volumes/MoviePilot", "-force"], capture_output=True)
+        dmg.unlink(missing_ok=True)
+        process = subprocess.run([str(item) for item in cmd], capture_output=True, text=True)
+        if process.returncode == 0:
+            break
+        rl.log(f"  出镜像失败：{(process.stderr or process.stdout).strip()}")
+        if attempt == 3:
+            mounted = subprocess.run(["mount"], capture_output=True, text=True).stdout.strip()
+            raise SystemExit(f"hdiutil 三次都没能出镜像。当前挂载：\n{mounted}")
+        time.sleep(20 * attempt)
     shutil.rmtree(staging, ignore_errors=True)
     rl.log(f"  镜像：{dmg}（{rl.dir_size_mb(dmg)} MB）")
     return dmg

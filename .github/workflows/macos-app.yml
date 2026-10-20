@@ -69,6 +69,10 @@ jobs:
         with:
           enable-cache: true
 
+      # make_icon.py 有 Pillow 才给图标做圆角，缺了就只能出方图，跟本机组的那份不一致
+      - name: 装出图标用的 Pillow
+        run: python3 -m pip install --quiet --disable-pip-version-check pillow
+
       # 解释器 30 MB、前端产物 50 MB、站点资源 2 MB：都带 sha256，缓存命中就直接复用
       - name: 缓存组包下载件
         uses: actions/cache@v4
