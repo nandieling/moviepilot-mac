@@ -15,6 +15,7 @@ import os
 import re
 import sys
 import subprocess
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -26,12 +27,15 @@ UPSTREAM_RELEASES = "https://github.com/jxxghp/MoviePilot/releases"
 USER_AGENT = "moviepilot-mac"
 BUILD_INFO = "Contents/Resources/build-info.json"
 DEFAULT_ASSET_SUFFIX = "-appweb.zip"
+BACKEND_LOCK = "Contents/Resources/app/uv.lock"
+PAYLOAD_LOCK = "app/uv.lock"
 
 # 宿主按这几个退出码给用户回话
 AVAILABLE = 0         # 取到新包并已投递
 FAILED = 1            # 网络、校验或磁盘出问题
 UP_TO_DATE = 10       # 已经是最新
 NO_CHANNEL = 20       # 这个包没写发布通道
+NEEDS_PACKAGE = 30    # 有新版本，但增分包装不上，得换整包
 
 
 class ChannelError(RuntimeError):
@@ -152,6 +156,49 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
+def installed_lock(app: Path) -> str | None:
+    """已装包的依赖清单哈希，更新器守卫比的就是它；没这份文件就当不知道。"""
+    path = app / BACKEND_LOCK
+    return sha256_file(path) if path.is_file() else None
+
+
+def payload_lock(archive: Path) -> str | None:
+    """增分包里的依赖清单哈希。读不动就交给更新器判断，别在这儿拦路。"""
+    try:
+        with zipfile.ZipFile(archive) as archive_file:
+            with archive_file.open(PAYLOAD_LOCK) as handle:
+                digest = hashlib.sha256()
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(block)
+                return digest.hexdigest()
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+        return None
+
+
+def skip_file(config_dir: Path) -> Path:
+    return config_dir / "temp" / "mpweb" / "needs-package.json"
+
+
+def _skipped(config_dir: Path, tag: str, lock: str | None) -> bool:
+    """同一个已装版本对同一个新包只试一次：装不上的结论先记下来，
+    否则每 12 小时白下一趟 56 MB 再被更新器退回。"""
+    if lock is None:
+        return False
+    try:
+        state = json.loads(skip_file(config_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return state.get("tag") == tag and state.get("lock") == lock
+
+
+def _remember_skip(config_dir: Path, tag: str, lock: str | None) -> None:
+    if lock is None:
+        return
+    target = skip_file(config_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"tag": tag, "lock": lock}, ensure_ascii=False), encoding="utf-8")
+
+
 def pick_asset(release: dict, suffix: str) -> tuple[dict, dict | None]:
     """找增分包本体和它的 sha256 旁文件。"""
     assets = [a for a in release.get("assets", []) if str(a.get("name", "")).endswith(suffix)]
@@ -181,6 +228,9 @@ def check(app: Path, config_dir: Path, *, repo: str | None = None,
     asset, sidecar = pick_asset(release, suffix)
     name = str(asset["name"])
     dest = config_dir / "temp" / "mpweb" / "updates" / name
+    have = installed_lock(app)
+    if _skipped(config_dir, newest, have):
+        return verdict | {"state": "needs_package"}
     expected = ""
     if sidecar:
         sidecar_path = pull(str(sidecar["browser_download_url"]), dest.with_suffix(".sha256"), token)
@@ -190,6 +240,13 @@ def check(app: Path, config_dir: Path, *, repo: str | None = None,
     if expected and actual != expected:
         dest.unlink(missing_ok=True)
         raise ChannelError(f"{name} 校验不过：期望 {expected}，实际 {actual}")
+    want = payload_lock(dest)
+    if have and want and have != want:
+        # 依赖清单变了，增分包只换前后端，装上去运行环境和清单就对不上；
+        # 这结论更新器也会拒，不如在下载当场说清楚，省一趟退出重开
+        dest.unlink(missing_ok=True)
+        _remember_skip(config_dir, newest, have)
+        return verdict | {"state": "needs_package"}
     verdict |= {"state": "available", "zip": str(dest), "size": dest.stat().st_size, "sha256": actual}
     _prune_updates(dest.parent, keep=dest)
     return verdict
@@ -204,11 +261,19 @@ def _prune_updates(directory: Path, keep: Path) -> None:
 
 def handoff(config_dir: Path, zip_path: Path) -> Path:
     """写投递文件，宿主的两秒轮询会取走它。"""
+    return _post(config_dir, {"action": "update", "zip": str(zip_path)})
+
+
+def open_page(config_dir: Path, url: str) -> Path:
+    """投递「用浏览器打开这个地址」，装不上增分包时给用户指条活路。"""
+    return _post(config_dir, {"action": "open", "url": url})
+
+
+def _post(config_dir: Path, body: dict) -> Path:
     dest = host_request_file(config_dir)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"action": "update", "zip": str(zip_path)}, ensure_ascii=False)
     tmp = dest.with_suffix(".json.tmp")
-    tmp.write_text(payload, encoding="utf-8")
+    tmp.write_text(json.dumps(body, ensure_ascii=False), encoding="utf-8")
     tmp.replace(dest)
     return dest
 
@@ -220,6 +285,7 @@ def main(argv: list[str] | None = None, *, fetch=fetch_json, pull=download) -> i
     parser.add_argument("--repo", help="覆盖发布通道仓库，形如 owner/name")
     parser.add_argument("--force", action="store_true", help="版本不比已装的更新也照取")
     parser.add_argument("--no-handoff", action="store_true", help="只下载，不通知宿主安装")
+    parser.add_argument("--interactive", action="store_true", help="用户主动查的：装不上时顺手打开发布页")
     args = parser.parse_args(argv)
     try:
         verdict = check(installed_app(args.app), args.config_dir, repo=args.repo, force=args.force,
@@ -232,6 +298,12 @@ def main(argv: list[str] | None = None, *, fetch=fetch_json, pull=download) -> i
         return FAILED
     log(args.config_dir, f"{verdict['state']}：已装 {verdict['installed']}，最新 {verdict['release']}")
     if verdict["state"] != "available":
+        if verdict["state"] == "needs_package":
+            # 后台定时查就别自己弹浏览器了，菜单上那行字够说明问题
+            if args.interactive and not args.no_handoff:
+                open_page(args.config_dir, release_page(args.app))
+            print(f"需要完整安装包（{verdict['release']}）")
+            return NEEDS_PACKAGE
         print(f"已是最新（{verdict['installed']}）")
         return UP_TO_DATE
     if not args.no_handoff:

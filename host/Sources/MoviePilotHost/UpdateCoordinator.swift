@@ -21,6 +21,7 @@ final class UpdateCoordinator {
     enum CheckOutcome {
         case installing
         case upToDate(String)
+        case needsPackage(String)
         case noChannel
         case failed
 
@@ -28,6 +29,7 @@ final class UpdateCoordinator {
             switch self {
             case .installing: return "正在安装更新…"
             case .upToDate(let version): return "已是最新（\(version)）"
+            case .needsPackage(let version): return "新版本 \(version) 要装完整安装包"
             case .noChannel: return "这个包没配发布通道"
             case .failed: return "检查更新失败，详见日志"
             }
@@ -80,7 +82,7 @@ final class UpdateCoordinator {
         guard autoCheck else { return }
         let poller = DispatchSource.makeTimerSource(queue: queue)
         poller.schedule(deadline: .now() + checkSchedule.first, repeating: checkSchedule.every)
-        poller.setEventHandler { [weak self] in self?.checkForUpdates { _ in } }
+        poller.setEventHandler { [weak self] in self?.checkForUpdates(manual: false) { _ in } }
         checker = poller
         poller.resume()
     }
@@ -183,17 +185,20 @@ final class UpdateCoordinator {
     }
 
     /// 查一次发布通道：取到新包会写投递文件，两秒内这次安装就接上了。
-    func checkForUpdates(_ completion: @escaping (CheckOutcome) -> Void) {
+    /// `manual` 是用户在菜单里点的：依赖清单变了那种装不上的情况，只有手点才顺手开浏览器。
+    func checkForUpdates(manual: Bool = true, _ completion: @escaping (CheckOutcome) -> Void) {
         guard !installing else { return }
         guard channelAvailable else {
             completion(.noChannel)
             return
         }
-        let checker = spawnedProcess(arguments: [
+        var arguments = [
             "-m", "mpweb.release",
             "--app", layout.bundleURL.path,
             "--config-dir", layout.configDir.path,
-        ])
+        ]
+        if manual { arguments.append("--interactive") }
+        let checker = spawnedProcess(arguments: arguments)
         var output = Data()
         let pipe = Pipe()
         checker.standardOutput = pipe
@@ -210,6 +215,9 @@ final class UpdateCoordinator {
             case 10:
                 let version = text.components(separatedBy: "（").last?.components(separatedBy: "）").first ?? ""
                 outcome = .upToDate(version)
+            case 30:
+                let version = text.components(separatedBy: "（").last?.components(separatedBy: "）").first ?? ""
+                outcome = .needsPackage(version)
             case 20: outcome = .noChannel
             default:
                 outcome = .failed

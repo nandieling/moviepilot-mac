@@ -7,19 +7,23 @@ import json
 import os
 import sys
 import unittest
+import io
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pythonhost"))
 
 from mpweb import release
-from mpweb.release import AVAILABLE, NO_CHANNEL, UP_TO_DATE, ChannelError, check, main
+from mpweb.release import (AVAILABLE, NEEDS_PACKAGE, NO_CHANNEL, UP_TO_DATE,
+                           ChannelError, check, main)
 
 PAYLOAD = b"delta-payload"
 DIGEST = hashlib.sha256(PAYLOAD).hexdigest()
 
 
-def bundle(root: Path, *, tag: str = "v3.1.6", channel: dict | None = None) -> Path:
+def bundle(root: Path, *, tag: str = "v3.1.6", channel: dict | None = None,
+           lock: bytes | None = None) -> Path:
     """够用的假包：只要 build-info 里有版本和通道就够这一层用。"""
     app = root / "MoviePilot.app"
     info = {
@@ -29,6 +33,10 @@ def bundle(root: Path, *, tag: str = "v3.1.6", channel: dict | None = None) -> P
     resources = app / "Contents" / "Resources"
     resources.mkdir(parents=True)
     (resources / "build-info.json").write_text(json.dumps(info), encoding="utf-8")
+    if lock is not None:
+        backend = resources / "app"
+        backend.mkdir()
+        (backend / "uv.lock").write_bytes(lock)
     return app
 
 
@@ -41,7 +49,15 @@ def release_payload(tag: str, *, sidecar: bool = True) -> dict:
     return {"tag_name": tag, "assets": assets}
 
 
-def fake_pull(body: bytes = PAYLOAD):
+def delta(lock: bytes) -> bytes:
+    """带依赖清单的增分包，只放比对要用的那一条。"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("app/uv.lock", lock)
+    return buffer.getvalue()
+
+
+def fake_pull(body: bytes = PAYLOAD, digest: str = DIGEST):
     """假下载器：记下取过哪些地址，按后缀决定给校验文本还是包体。"""
     seen: list[str] = []
 
@@ -49,7 +65,7 @@ def fake_pull(body: bytes = PAYLOAD):
         seen.append(url)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if url.endswith(".sha256"):
-            dest.write_text(f"{DIGEST}  MoviePilot-x.zip\n", encoding="utf-8")
+            dest.write_text(f"{digest}  MoviePilot-x.zip\n", encoding="utf-8")
         else:
             dest.write_bytes(body)
         return dest
@@ -160,6 +176,51 @@ class ChannelTest(unittest.TestCase):
         check(bundle(self.root), self.config,
               fetch=lambda url, token: release_payload("v3.1.7"), pull=pull)
         self.assertEqual([p.name for p in updates.glob("*.zip")], ["MoviePilot-v3.1.7-arm64-appweb.zip"])
+
+    def test_依赖清单变了就退回完整包(self):
+        """增分包只换前后端，uv.lock 变了装上去就是运行环境和清单不符。"""
+        body = delta(b"new-lock")
+        app = bundle(self.root, lock=b"old-lock")
+        pull, seen = fake_pull(body=body, digest=hashlib.sha256(body).hexdigest())
+        verdict = check(app, self.config,
+                        fetch=lambda url, token: release_payload("v3.1.7"), pull=pull)
+        self.assertEqual(verdict["state"], "needs_package")
+        self.assertEqual(list((self.config / "temp/mpweb/updates").glob("*.zip")), [])
+        self.assertFalse(release.host_request_file(self.config).exists())
+        # 结论要记下来，否则每轮检查都白下一趟包
+        self.assertTrue(release.skip_file(self.config).is_file())
+        again = check(app, self.config,
+                      fetch=lambda url, token: release_payload("v3.1.7"), pull=pull)
+        self.assertEqual(again["state"], "needs_package")
+        self.assertEqual(len(seen), 2, "第二次只查版本，不再下载")
+
+    def test_依赖清单没变照旧能装(self):
+        body = delta(b"same-lock")
+        app = bundle(self.root, lock=b"same-lock")
+        pull, _ = fake_pull(body=body, digest=hashlib.sha256(body).hexdigest())
+        verdict = check(app, self.config,
+                        fetch=lambda url, token: release_payload("v3.1.7"), pull=pull)
+        self.assertEqual(verdict["state"], "available")
+
+    def test_手点检查时打开发布页(self):
+        body = delta(b"new-lock")
+        app = bundle(self.root, lock=b"old-lock")
+        pull, _ = fake_pull(body=body, digest=hashlib.sha256(body).hexdigest())
+        code = main(["--app", str(app), "--config-dir", str(self.config), "--interactive"],
+                    fetch=lambda url, token: release_payload("v3.1.7"), pull=pull)
+        self.assertEqual(code, NEEDS_PACKAGE)
+        request = json.loads(release.host_request_file(self.config).read_text(encoding="utf-8"))
+        self.assertEqual(request["action"], "open")
+        self.assertEqual(request["url"], "https://github.com/owner/moviepilot-mac/releases/latest")
+
+    def test_后台检查不自作主张开浏览器(self):
+        body = delta(b"new-lock")
+        app = bundle(self.root, lock=b"old-lock")
+        pull, _ = fake_pull(body=body, digest=hashlib.sha256(body).hexdigest())
+        code = main(["--app", str(app), "--config-dir", str(self.config)],
+                    fetch=lambda url, token: release_payload("v3.1.7"), pull=pull)
+        self.assertEqual(code, NEEDS_PACKAGE)
+        self.assertFalse(release.host_request_file(self.config).exists())
 
     def test_token_从配置文件认(self):
         (self.config / "app.env").write_text("GITHUB_TOKEN=ghabc\n", encoding="utf-8")
