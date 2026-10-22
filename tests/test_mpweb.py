@@ -244,6 +244,32 @@ class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
         await self.client.get("/api/v1/system/restart")
         self.assertEqual(SEEN["path"], "/api/v1/system/restart")
 
+    async def test_update_button_opens_the_release_page(self) -> None:
+        """界面点「更新」：交宿主开浏览器，别让上游那句「环境不支持」留在屏幕上。"""
+        response = await self.client.post(
+            "/api/v1/system/update/download",
+            json={"target": "application"},
+            headers={"Cookie": "moviepilot=1"},
+        )
+        self.assertTrue(response.json()["success"])
+        request = json.loads(self.request_file.read_text())
+        self.assertEqual(request["action"], "open")
+        self.assertTrue(request["url"].startswith("https://github.com/"))
+
+    async def test_update_install_does_not_claim_to_be_installing(self) -> None:
+        response = await self.client.post(
+            "/api/v1/system/update/install",
+            json={"target": "application"},
+            headers={"Cookie": "moviepilot=1"},
+        )
+        body = response.json()
+        self.assertFalse(body["success"])
+        self.assertIn("更新页面", body["message"])
+
+    async def test_update_without_credentials_still_reaches_the_backend(self) -> None:
+        await self.client.post("/api/v1/system/update/download", json={})
+        self.assertEqual(SEEN["path"], "/api/v1/system/update/download")
+
 
 class WatchdogTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_serve_refuses_to_start_without_backend(self) -> None:

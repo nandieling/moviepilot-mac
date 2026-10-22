@@ -23,6 +23,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from .proxy import BackendProxy
+from .release import release_page
 from .watchdog import BackendWatchdog, guard_parent_death
 
 # 后端同源入口，与 public/service.js 的代理前缀保持一致。
@@ -37,6 +38,9 @@ SERVICE_WORKER_PATH = "/service-worker.js"
 
 # 界面里的「重启系统」：上游的受管重启只认 Docker 与 CLI 状态文件，应用版由宿主执行。
 RESTART_PATH = "/api/v1/system/restart"
+# 界面里的「更新」按钮：上游这两步开头都是 can_restart() 守卫，应用版既没有 Docker
+# 的 supervisor 也没有 CLI 状态文件，只会被顶回一句「当前运行环境不支持升级操作」。
+UPDATE_PATHS = ("/api/v1/system/update/download", "/api/v1/system/update/install")
 REQUEST_FILE_ENV = "MOVPILOT_HOST_REQUEST_FILE"
 
 
@@ -56,11 +60,27 @@ def host_request_file() -> Path | None:
     return None
 
 
-def request_host_restart() -> str | None:
-    """把重启请求交给宿主并交代它做什么；载荷已下载待安装时顺带让它落地更新。"""
+def post_host_request(payload: dict) -> bool:
+    """把一份动作请求交给宿主；连数据目录都没有就说明这层不在应用里跑。"""
     target = host_request_file()
     if target is None:
-        return None
+        return False
+    body = dict(payload, requested_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=target.parent, prefix=".request-", delete=False
+    )
+    try:
+        handle.write(json.dumps(body, ensure_ascii=False))
+        handle.flush()
+    finally:
+        handle.close()
+    os.replace(handle.name, target)
+    return True
+
+
+def request_host_restart() -> str | None:
+    """把重启请求交给宿主并交代它做什么；载荷已下载待安装时顺带让它落地更新。"""
     config_dir = _config_dir()
     staged = (
         config_dir / "temp" / "moviepilot-update" / "install.json"
@@ -68,21 +88,7 @@ def request_host_restart() -> str | None:
         else None
     )
     action = "update" if staged is not None and staged.is_file() else "restart"
-    payload = json.dumps(
-        {"action": action, "requested_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
-        ensure_ascii=False,
-    )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    handle = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=target.parent, prefix=".request-", delete=False
-    )
-    try:
-        handle.write(payload)
-        handle.flush()
-    finally:
-        handle.close()
-    os.replace(handle.name, target)
-    return action
+    return action if post_host_request({"action": action}) else None
 
 
 class SpaStaticFiles(StaticFiles):
@@ -182,9 +188,40 @@ def restart_endpoint(proxy: BackendProxy):
     return handler
 
 
+def update_endpoint(proxy: BackendProxy):
+    """接管界面里的「更新」按钮，改成交给宿主用默认浏览器打开发布页。
+
+    上游的下载与安装两步开头都有 can_restart() 守卫，应用版过不了，点了只会得到一句
+    「当前运行环境不支持升级操作」；换整包这件事本来就得由安装包来做，所以这里把用户
+    领到发布页去。增分包那套自助升级仍走菜单栏的「检查更新」，不受影响。
+
+    下载那步回成功：前端对 success=false 会先弹服务端消息再补一句「下载失败」，
+    叠两条没意义。安装那步照实回失败，免得界面停在「正在安装」。
+    """
+
+    async def handler(request: Request) -> Response:
+        if host_request_file() is None or not any(
+            request.headers.get(name) for name in CREDENTIAL_HEADERS
+        ):
+            return await proxy.handle(request)
+        if not post_host_request({"action": "open", "url": release_page()}):
+            return await proxy.handle(request)
+        installed = request.url.path.endswith("/download")
+        message = ("更新页面已在浏览器打开，下载安装包后覆盖即可"
+                   if installed else "应用版请用完整安装包升级，更新页面已在浏览器打开")
+        return JSONResponse(
+            {"success": installed, "message": message, "data": None},
+            status_code=200,
+        )
+
+    return handler
+
+
 def create_app(*, web_root: Path, proxy: BackendProxy) -> Starlette:
     routes: list[Mount | Route] = [
         Route(RESTART_PATH, endpoint=restart_endpoint(proxy), methods=["GET"]),
+        Route(UPDATE_PATHS[0], endpoint=update_endpoint(proxy), methods=["POST"]),
+        Route(UPDATE_PATHS[1], endpoint=update_endpoint(proxy), methods=["POST"]),
     ]
     routes += [Mount(path, app=ProxyEndpoint(proxy)) for path in PROXY_MOUNTS]
     if service_worker_response() is not None:

@@ -20,6 +20,9 @@ from pathlib import Path
 from typing import Callable
 
 API = "https://api.github.com"
+GITHUB = "https://github.com"
+# 没有发布通道时的兜底：总得给个能下载的地方
+UPSTREAM_RELEASES = "https://github.com/jxxghp/MoviePilot/releases"
 USER_AGENT = "moviepilot-mac"
 BUILD_INFO = "Contents/Resources/build-info.json"
 DEFAULT_ASSET_SUFFIX = "-appweb.zip"
@@ -61,6 +64,15 @@ def channel_of(info: dict) -> tuple[str, str]:
     if not repo:
         raise ChannelError("包里没写发布通道（组包时给 --release-repo）")
     return repo, str(channel.get("asset_suffix") or DEFAULT_ASSET_SUFFIX)
+
+
+def release_page(app: Path | None = None, fallback: str = UPSTREAM_RELEASES) -> str:
+    """发布页地址：界面点「更新」时用它。没写通道就退回上游发布页，至少不给空链接。"""
+    try:
+        repo, _ = channel_of(read_build_info(installed_app(app)))
+    except ChannelError:
+        return fallback
+    return f"{GITHUB}/{repo}/releases/latest"
 
 
 def version_key(tag: str) -> tuple[int, ...]:

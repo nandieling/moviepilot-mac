@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import os.log
 
 /// 接管界面交给宿主的两件事：重启服务，以及把更新换进包里。
@@ -13,6 +14,7 @@ final class UpdateCoordinator {
     private struct Request: Decodable {
         let action: String
         let zip: String?
+        let url: String?
     }
 
     /// 手动检查的回话，界面直接拿去显示。
@@ -124,9 +126,20 @@ final class UpdateCoordinator {
         switch request.action {
         case "update":
             installUpdate(zip: request.zip)
+        case "open":
+            openInBrowser(request.url)
         default:
             log.notice("界面请求重启服务")
             supervisor.restart()
+        }
+    }
+
+    /// 用系统默认浏览器打开地址：界面里点「更新」时用它去发布页下载安装包。
+    private func openInBrowser(_ target: String?) {
+        guard let target, let url = URL(string: target) else { return }
+        log.notice("界面请求打开更新页面：\(target, privacy: .public)")
+        DispatchQueue.main.async {
+            NSWorkspace.shared.open(url)
         }
     }
 
