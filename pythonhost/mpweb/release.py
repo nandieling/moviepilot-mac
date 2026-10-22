@@ -117,10 +117,14 @@ def log(config_dir: Path, message: str) -> None:
             handle.write(f"{stamp} 发布通道：{message}\n")
 
 
-def _curl(args: list[str]) -> bytes:
+def _curl(args: list[str], *, max_time: int = 120, stall: tuple[int, int] | None = None) -> bytes:
     """取件交给系统 curl：包内那个解释器不带根证书，urllib 换个机器就验不过。"""
-    process = subprocess.run(["curl", "--fail", "--silent", "--show-error", "--location",
-                              "--max-time", "120", *args], capture_output=True)
+    command = ["curl", "--fail", "--silent", "--show-error", "--location",
+               "--max-time", str(max_time)]
+    if stall:
+        # 大文件按「掉速才算失败」判定：GitHub 慢的时候 120 秒根本下不完这 56 MB
+        command += ["--speed-limit", str(stall[0]), "--speed-time", str(stall[1])]
+    process = subprocess.run([*command, *args], capture_output=True)
     if process.returncode != 0:
         reason = process.stderr.decode("utf-8", "replace").strip() or f"curl 退出码 {process.returncode}"
         raise ChannelError(f"取件失败：{reason}")
@@ -143,7 +147,8 @@ def fetch_json(url: str, token: str | None) -> dict:
 def download(url: str, dest: Path, token: str | None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_suffix(dest.suffix + ".part")
-    _curl(["--output", str(part), *_headers(token), url])
+    # 包体给一小时，但一分钟掉到 1 KB/s 以下就撒手，别挂着不放
+    _curl(["--output", str(part), *_headers(token), url], max_time=3600, stall=(1024, 60))
     part.replace(dest)
     return dest
 

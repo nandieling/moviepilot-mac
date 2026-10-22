@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+import subprocess
 import unittest
 import io
 import zipfile
@@ -167,6 +168,27 @@ class ChannelTest(unittest.TestCase):
         meta = self.root / "release.json"
         meta.write_text(json.dumps({"tag_name": "v9.9.9"}), encoding="utf-8")
         self.assertEqual(release.fetch_json(meta.as_uri(), None)["tag_name"], "v9.9.9")
+
+    def test_包体按掉速而不是钟点判定失败(self):
+        """56 MB 在慢网上下得完就该算成功，硬超时会让每次检查都白跑。"""
+        calls: list[list[str]] = []
+        saved = release.subprocess.run
+
+        def fake_run(command, **kwargs):
+            calls.append(list(command))
+            target = Path(command[command.index("--output") + 1])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(PAYLOAD)
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+
+        release.subprocess.run = fake_run
+        try:
+            release.download("https://example.test/pkg.zip", self.config / "pkg.zip", None)
+        finally:
+            release.subprocess.run = saved
+        args = calls[0]
+        self.assertEqual(args[args.index("--max-time") + 1], "3600")
+        self.assertIn("--speed-limit", args)
 
     def test_旧包会被清走(self):
         updates = self.config / "temp/mpweb/updates"
