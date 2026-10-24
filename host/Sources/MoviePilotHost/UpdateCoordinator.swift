@@ -133,6 +133,8 @@ final class UpdateCoordinator {
         default:
             log.notice("界面请求重启服务")
             supervisor.restart()
+            // 换完站点资源顺手开一下发布页：主程序那半还得靠安装包
+            openInBrowser(request.url)
         }
     }
 

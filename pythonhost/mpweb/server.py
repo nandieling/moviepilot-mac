@@ -23,7 +23,10 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from .proxy import BackendProxy
+from .release import ChannelError
+from .release import check as channel_check
 from .release import release_page
+from .site_resources import update as update_site_resources
 from .watchdog import BackendWatchdog, guard_parent_death
 
 # 后端同源入口，与 public/service.js 的代理前缀保持一致。
@@ -43,10 +46,22 @@ RESTART_PATH = "/api/v1/system/restart"
 UPDATE_PATHS = ("/api/v1/system/update/download", "/api/v1/system/update/install")
 REQUEST_FILE_ENV = "MOVPILOT_HOST_REQUEST_FILE"
 
+# 上游用 body 里的 target 说明要更哪一部分：application、resources、all。
+RESOURCE_TARGETS = {"all", "resources", "site"}
+
 
 def _config_dir() -> Path | None:
     configured = (os.environ.get("CONFIG_DIR") or "").strip()
     return Path(configured).expanduser() if configured else None
+
+
+def bundle_root() -> Path | None:
+    """从托管层所在位置反推 .app；开发态直接在源码目录跑就没有这一层。"""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
 
 
 def host_request_file() -> Path | None:
@@ -189,11 +204,13 @@ def restart_endpoint(proxy: BackendProxy):
 
 
 def update_endpoint(proxy: BackendProxy):
-    """接管界面里的「更新」按钮，改成交给宿主用默认浏览器打开发布页。
+    """接管界面里的「更新」按钮，把能做的那半做掉，另一半领去发布页。
 
     上游的下载与安装两步开头都有 can_restart() 守卫，应用版过不了，点了只会得到一句
-    「当前运行环境不支持升级操作」；换整包这件事本来就得由安装包来做，所以这里把用户
-    领到发布页去。增分包那套自助升级仍走菜单栏的「检查更新」，不受影响。
+    「当前运行环境不支持升级操作」。可这两步里其实只有一半需要换整包：站点资源就是
+    `app/application/site` 下两个文件，就地换完重启后端即可，这里自己按上游那份清单取件；
+    主程序换版本仍然得由安装包动手，于是把用户领到发布页。增分包那套自助升级仍走菜单栏的
+    「检查更新」，不受影响。
 
     下载那步回成功：前端对 success=false 会先弹服务端消息再补一句「下载失败」，
     叠两条没意义。安装那步照实回失败，免得界面停在「正在安装」。
@@ -204,17 +221,60 @@ def update_endpoint(proxy: BackendProxy):
             request.headers.get(name) for name in CREDENTIAL_HEADERS
         ):
             return await proxy.handle(request)
-        if not post_host_request({"action": "open", "url": release_page()}):
-            return await proxy.handle(request)
+        target = await _update_target(request)
         installed = request.url.path.endswith("/download")
         message = ("更新页面已在浏览器打开，下载安装包后覆盖即可"
                    if installed else "应用版请用完整安装包升级，更新页面已在浏览器打开")
+        resources: dict = {}
+        app, config_dir = bundle_root(), _config_dir()
+        if app is not None and config_dir is not None and target in RESOURCE_TARGETS:
+            resources = await asyncio.to_thread(update_site_resources, app, config_dir)
+            if resources.get("state") == "updated":
+                # 站点资源换了就得重启后端才会重新加载；主程序另有新版本就顺带把发布页开出来
+                url = release_page() if _channel_ahead(app, config_dir) else None
+                payload = {"action": "restart"}
+                if url:
+                    payload["url"] = url
+                post_host_request(payload)
+                done = "站点资源已更新，服务正在重启"
+                return JSONResponse(
+                    {"success": True,
+                     "message": done if not url else f"{done}；主程序更新页面已在浏览器打开"},
+                    status_code=200,
+                )
+            if target != "all" and resources.get("state") == "latest":
+                # 只问了站点资源，而它本来就是最新：不用把人领去发布页
+                return JSONResponse(
+                    {"success": True, "message": "站点资源已是最新，无需更新", "data": None},
+                    status_code=200,
+                )
+        if not post_host_request({"action": "open", "url": release_page()}):
+            return await proxy.handle(request)
+        if resources.get("state") == "failed":
+            message = f"站点资源没更新成：{resources.get('error')}；{message}"
         return JSONResponse(
             {"success": installed, "message": message, "data": None},
             status_code=200,
         )
 
     return handler
+
+
+async def _update_target(request: Request) -> str:
+    """读界面上报的更新范围；读不出来就按「换主程序」处理，那至少会把人领到发布页。"""
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001 - 请求体可能是空的或者根本不是一个对象
+        return "application"
+    return str(body.get("target") or "application") if isinstance(body, dict) else "application"
+
+
+def _channel_ahead(app: Path, config_dir: Path) -> bool:
+    """本仓库的发布通道上有没有更新的主程序包；只问版本，不下增分包。"""
+    try:
+        return channel_check(app, config_dir, fetch_package=False).get("state") == "available"
+    except (ChannelError, OSError):
+        return False
 
 
 def create_app(*, web_root: Path, proxy: BackendProxy) -> Starlette:

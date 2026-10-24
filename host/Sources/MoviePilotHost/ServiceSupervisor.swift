@@ -89,8 +89,12 @@ final class ServiceSupervisor {
             environment: environment,
             logName: "webhost"
         )
-        backendProcess.terminationHandler = { [weak self] in self?.handleExit(role: "后端", status: $0.terminationStatus) }
-        frontendProcess.terminationHandler = { [weak self] in self?.handleExit(role: "前端托管层", status: $0.terminationStatus) }
+        backendProcess.terminationHandler = { [weak self] in
+            self?.handleExit(role: "后端", process: $0, status: $0.terminationStatus)
+        }
+        frontendProcess.terminationHandler = { [weak self] in
+            self?.handleExit(role: "前端托管层", process: $0, status: $0.terminationStatus)
+        }
         do {
             try backendProcess.run()
             try frontendProcess.run()
@@ -141,9 +145,13 @@ final class ServiceSupervisor {
         return process
     }
 
-    private func handleExit(role: String, status: Int32) {
+    private func handleExit(role: String, process: Process, status: Int32) {
         queue.async {
             guard self.backend != nil || self.frontend != nil else { return }
+            // 只认当前在管的这两个进程：重启、退出应用时自己停掉的子进程也会回调到这里，
+            // 把它们当成崩溃重来一轮，就会连环换三茬进程，最后判定「连续异常退出」撒手不管。
+            let tracked = role == "后端" ? self.backend : self.frontend
+            guard tracked === process else { return }
             self.log.warning("\(role, privacy: .public) 退出，状态码 \(status)")
             if Date().timeIntervalSince(self.lastStart) > 300 { self.restartCount = 0 }
             self.restartCount += 1

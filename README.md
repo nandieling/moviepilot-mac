@@ -217,6 +217,16 @@ GET 响应直接写盘，而 `Cache-Control: no-store` 拦不住这个写入 —
 `/download` 回 `success:true`，免得前端再补一句「下载失败」；`/install` 回 `success:false`
 带上同一句说明，因为那时候真的什么都没装。
 
+「发现站点资源更新」那个弹窗是另一回事，它不需要换整包：认证与索引资源就是
+`app/application/site` 下的 `sites.*.so` 和 `user.sites.v3.bin` 两个文件。`body` 里的
+`target` 带上 `resources` 或 `all` 时，托管层用 `mpweb/site_resources.py` 按上游同一份
+`package.v3.json` 自己取件、就地换文件（原生扩展补签一次，整包再重新签一遍），然后投
+`{"action":"restart",…}` 叫宿主重启后端把新资源读进来；本仓库还有更新的主程序包时才顺带
+把发布页开出来。取件先试 `GITHUB_PROXY` 前缀的原始地址，不通退回 `api.github.com` —— 国内
+网络常把 `raw.githubusercontent.com` 解析成 `0.0.0.0`，只认那个域名的话这条更新永远走不通。
+要么不动，要动就一起动：清单声明的目标目录不是 `app/application/site`、或者原生扩展签名没过，
+就整体退回原文件，不会把认证和索引分到两个版本上。
+
 完整安装包是自足的：`dist/MoviePilot-<版本>-<架构>.dmg` 拖进「应用程序」就能用，安装和运行
 都不要求访问 GitHub。想让应用连版本都不去查，菜单里取消「自动检查更新」即可，状态写进
 `host-prefs.json`，之后只有手动点「检查更新」才会打网络。上游后端自己那套联网功能（插件市场、

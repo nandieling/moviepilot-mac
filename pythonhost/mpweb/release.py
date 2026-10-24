@@ -216,8 +216,12 @@ def pick_asset(release: dict, suffix: str) -> tuple[dict, dict | None]:
 
 def check(app: Path, config_dir: Path, *, repo: str | None = None,
           force: bool = False, fetch: Callable[[str, str | None], dict] = fetch_json,
-          pull: Callable[[str, Path, str | None], Path] = download) -> dict:
-    """查一次发布通道。返回结论，不抛网络异常：定时任务里失败就该安静下来。"""
+          pull: Callable[[str, Path, str | None], Path] = download,
+          fetch_package: bool = True) -> dict:
+    """查一次发布通道。返回结论，不抛网络异常：定时任务里失败就该安静下来。
+
+    `fetch_package=False` 只问有没有新版、不把 56 MB 拉下来，给界面判断该不该把人领去发布页。
+    """
     info = read_build_info(app)
     if repo:
         channel_repo, suffix = repo.strip(), DEFAULT_ASSET_SUFFIX
@@ -233,6 +237,8 @@ def check(app: Path, config_dir: Path, *, repo: str | None = None,
     asset, sidecar = pick_asset(release, suffix)
     name = str(asset["name"])
     dest = config_dir / "temp" / "mpweb" / "updates" / name
+    if not fetch_package:
+        return verdict | {"state": "available"}
     have = installed_lock(app)
     if _skipped(config_dir, newest, have):
         return verdict | {"state": "needs_package"}

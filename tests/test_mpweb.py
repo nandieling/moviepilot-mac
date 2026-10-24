@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "pythonhost"))
 import httpx
 
 from mpweb import BackendProxy, BackendWatchdog, create_app, serve
+from mpweb import server as mpweb_server
 
 SEEN: dict = {}
 
@@ -269,6 +270,51 @@ class ProxyTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_update_without_credentials_still_reaches_the_backend(self) -> None:
         await self.client.post("/api/v1/system/update/download", json={})
         self.assertEqual(SEEN["path"], "/api/v1/system/update/download")
+
+    async def test_update_refreshes_site_resources_in_place(self) -> None:
+        """站点资源不需要换整包：就地换完叫宿主重启后端，别再顶一句「环境不支持」。"""
+        done = mock.Mock(return_value={"state": "updated", "files": ["user.sites.v3.bin"]})
+        with mock.patch.object(mpweb_server, "bundle_root", return_value=Path(self.web_root)), \
+                mock.patch.object(mpweb_server, "update_site_resources", done), \
+                mock.patch.object(mpweb_server, "_channel_ahead", return_value=False):
+            response = await self.client.post(
+                "/api/v1/system/update/download",
+                json={"target": "all"},
+                headers={"Cookie": "moviepilot=1"},
+            )
+        body = response.json()
+        self.assertTrue(body["success"])
+        self.assertIn("站点资源", body["message"])
+        self.assertTrue(done.called)
+        self.assertEqual(json.loads(self.request_file.read_text())["action"], "restart")
+
+    async def test_failed_site_resource_update_still_points_at_the_release(self) -> None:
+        """资源没换成也要说清楚原因，同时把主程序那条路留在原地。"""
+        done = mock.Mock(return_value={"state": "failed", "error": "连不上资源仓库"})
+        with mock.patch.object(mpweb_server, "bundle_root", return_value=Path(self.web_root)), \
+                mock.patch.object(mpweb_server, "update_site_resources", done):
+            response = await self.client.post(
+                "/api/v1/system/update/download",
+                json={"target": "resources"},
+                headers={"Cookie": "moviepilot=1"},
+            )
+        body = response.json()
+        self.assertTrue(body["success"])
+        self.assertIn("连不上资源仓库", body["message"])
+        self.assertEqual(json.loads(self.request_file.read_text())["action"], "open")
+
+    async def test_site_resource_update_with_nothing_to_do_stays_quiet(self) -> None:
+        """本来就是最新，就别白开一个浏览器标签页。"""
+        done = mock.Mock(return_value={"state": "latest", "files": []})
+        with mock.patch.object(mpweb_server, "bundle_root", return_value=Path(self.web_root)), \
+                mock.patch.object(mpweb_server, "update_site_resources", done):
+            response = await self.client.post(
+                "/api/v1/system/update/download",
+                json={"target": "resources"},
+                headers={"Cookie": "moviepilot=1"},
+            )
+        self.assertIn("已是最新", response.json()["message"])
+        self.assertFalse(self.request_file.exists())
 
 
 class WatchdogTestCase(unittest.IsolatedAsyncioTestCase):
