@@ -47,6 +47,19 @@ def wait_ready(url: str, seconds: int) -> bool:
     return False
 
 
+ENTRY_SCRIPT = re.compile(r"<script\b[^>]*\btype=[\"']module[\"'][^>]*\bsrc=[\"']\.?/?([^\"']+)[\"']", re.I)
+# 入口那个 js 的名字上游会换：v3.1 是 index-<hash>.js，v3.2 起是 main-<hash>.js，
+# 所以只认「assets 下带内容哈希的模块脚本」，不盯死某个前缀。
+HASHED_ASSET = re.compile(r"assets/[\w.-]+-[A-Za-z0-9_-]{6,}\.js$")
+
+
+def entry_asset(html: str) -> tuple[str | None, list[str]]:
+    """从入口页里找出带哈希的模块脚本，顺带把找到的地址留给失败信息用。"""
+    found = [match.group(1) for match in ENTRY_SCRIPT.finditer(html)]
+    hashed = next((src for src in found if HASHED_ASSET.search(src)), None)
+    return hashed, found
+
+
 class Checks:
     def __init__(self) -> None:
         self.failed: list[str] = []
@@ -75,10 +88,10 @@ def main() -> int:
     checks.check("入口页是 HTML", "text/html" in headers.get("content-type", ""), headers.get("content-type", ""))
     checks.check("入口页每次回源校验", headers.get("cache-control") == "no-cache", str(headers.get("cache-control")))
 
-    asset = re.search(r"assets/(index-[A-Za-z0-9_-]+\.js)", body.decode("utf-8", "replace"))
-    checks.check("入口页引用了哈希产物", asset is not None)
+    asset, scripts = entry_asset(body.decode("utf-8", "replace"))
+    checks.check("入口页引用了哈希产物", asset is not None, f"页面上的模块脚本：{scripts or '无'}")
     if asset:
-        status, headers, _ = fetch(f"{base}/assets/{asset.group(1)}")
+        status, headers, _ = fetch(f"{base}/{asset.lstrip('/')}")
         checks.check("哈希产物返回 200", status == 200, f"实际 {status}")
         checks.check("哈希产物走不可变缓存", "immutable" in headers.get("cache-control", ""), str(headers.get("cache-control")))
 
